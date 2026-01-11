@@ -1,0 +1,1034 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Verus Web Miner</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+            color: #fff;
+        }
+
+        .container {
+            max-width: 800px;
+            width: 100%;
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.37);
+        }
+
+        h1 {
+            text-align: center;
+            margin-bottom: 10px;
+            font-size: 2.5em;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+        }
+
+        .subtitle {
+            text-align: center;
+            opacity: 0.9;
+            margin-bottom: 30px;
+            font-size: 1.1em;
+        }
+
+        .status-box {
+            background: rgba(255, 255, 255, 0.15);
+            border-radius: 15px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+
+        .status-item {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 15px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .status-item:last-child {
+            margin-bottom: 0;
+            padding-bottom: 0;
+            border-bottom: none;
+        }
+
+        .status-label {
+            font-weight: 600;
+            opacity: 0.9;
+        }
+
+        .status-value {
+            font-family: 'Courier New', monospace;
+            font-weight: 700;
+        }
+
+        .status-value.good {
+            color: #4ade80;
+        }
+
+        .status-value.bad {
+            color: #f87171;
+        }
+
+        .controls {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+
+        button {
+            flex: 1;
+            min-width: 150px;
+            padding: 15px 30px;
+            font-size: 1.1em;
+            font-weight: 600;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px 0 rgba(0, 0, 0, 0.2);
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px 0 rgba(0, 0, 0, 0.3);
+        }
+
+        button:active {
+            transform: translateY(0);
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        #startBtn {
+            background: linear-gradient(135deg, #4ade80 0%, #22c55e 100%);
+            color: white;
+        }
+
+        #stopBtn {
+            background: linear-gradient(135deg, #f87171 0%, #ef4444 100%);
+            color: white;
+        }
+
+        .settings {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 15px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+
+        .settings h3 {
+            margin-bottom: 15px;
+            font-size: 1.3em;
+        }
+
+        .setting-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .setting-item label {
+            flex: 1;
+            font-weight: 600;
+            margin-right: 15px;
+        }
+
+        .setting-item input {
+            flex: 2;
+            padding: 10px;
+            border: none;
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.2);
+            color: white;
+            font-size: 1em;
+        }
+
+        .setting-item input::placeholder {
+            color: rgba(255, 255, 255, 0.5);
+        }
+
+        .log {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 10px;
+            padding: 15px;
+            max-height: 300px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 5px;
+            border-left: 3px solid rgba(255, 255, 255, 0.3);
+            padding-left: 10px;
+        }
+
+        .log-entry.info {
+            border-left-color: #60a5fa;
+        }
+
+        .log-entry.success {
+            border-left-color: #4ade80;
+        }
+
+        .log-entry.error {
+            border-left-color: #f87171;
+        }
+
+        .log-entry.warning {
+            border-left-color: #fbbf24;
+        }
+
+        .worker-count {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .worker-count input[type="number"] {
+            width: 80px;
+        }
+
+        @keyframes pulse {
+            0%, 100% {
+                opacity: 1;
+            }
+            50% {
+                opacity: 0.5;
+            }
+        }
+
+        .mining {
+            animation: pulse 2s ease-in-out infinite;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>⛏️ Verus Web Miner</h1>
+        <p class="subtitle">Browser-based WASM Miner</p>
+
+        <div class="settings">
+            <h3>⚙️ Settings</h3>
+            <div class="setting-item">
+                <label for="serverUrl">Server URL:</label>
+                <input type="text" id="serverUrl" value="ws://172.21.112.214:3000" placeholder="ws://172.21.112.214:3000">
+            </div>
+            <div class="setting-item worker-count">
+                <label for="workers">Workers:</label>
+                <input type="number" id="workers" value="4" min="1" max="16">
+                <span>(Web Workers for parallel mining)</span>
+            </div>
+        </div>
+
+        <div class="controls">
+            <button id="startBtn" onclick="startMining()">Start Mining</button>
+            <button id="stopBtn" onclick="stopMining()" disabled>Stop Mining</button>
+        </div>
+
+        <div class="status-box">
+            <div class="status-item">
+                <span class="status-label">Status:</span>
+                <span id="status" class="status-value">Idle</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Hashrate:</span>
+                <span id="hashrate" class="status-value">0 H/s</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Shares:</span>
+                <span id="shares" class="status-value">0 accepted / 0 rejected</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Job ID:</span>
+                <span id="jobId" class="status-value">-</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Connection:</span>
+                <span id="connection" class="status-value bad">Disconnected</span>
+            </div>
+        </div>
+
+        <div class="log" id="log"></div>
+    </div>
+
+    <script>
+        let ws = null;
+        let miners = [];
+        let mining = false;
+        let currentWork = null;
+        let sharesAccepted = 0;
+        let sharesRejected = 0;
+        let workerHashrates = []; // Track hashrate per worker
+        let startTime = 0;
+        let interrupted = false; // Track if workers were interrupted (clean job)
+
+        // UI Elements
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const statusEl = document.getElementById('status');
+        const hashrateEl = document.getElementById('hashrate');
+        const sharesEl = document.getElementById('shares');
+        const jobIdEl = document.getElementById('jobId');
+        const connectionEl = document.getElementById('connection');
+        const logEl = document.getElementById('log');
+        const serverUrlInput = document.getElementById('serverUrl');
+        const workersInput = document.getElementById('workers');
+
+        function log(message, type = 'info') {
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            const timestamp = new Date().toLocaleTimeString();
+            entry.textContent = `[${timestamp}] ${message}`;
+            logEl.insertBefore(entry, logEl.firstChild);
+            
+            // Keep only last 100 entries
+            while (logEl.children.length > 100) {
+                logEl.removeChild(logEl.lastChild);
+            }
+        }
+
+        function updateStatus(status, className = '') {
+            statusEl.textContent = status;
+            statusEl.className = `status-value ${className}`;
+            if (className === 'good' && mining) {
+                statusEl.classList.add('mining');
+            }
+        }
+
+        function updateConnection(connected) {
+            connectionEl.textContent = connected ? 'Connected' : 'Disconnected';
+            connectionEl.className = `status-value ${connected ? 'good' : 'bad'}`;
+        }
+
+        function updateHashrate() {
+            if (!mining || !startTime) return;
+            
+            // Sum hashrates from all workers (these are instantaneous rates)
+            const instantHashrate = workerHashrates.reduce((sum, rate) => sum + (rate || 0), 0);
+            
+            // Use actual hashrate (nonce scanning speed for Verus)
+            const clampedHashrate = instantHashrate;
+            
+            let hashrateStr;
+            if (clampedHashrate > 1000000) {
+                hashrateStr = (clampedHashrate / 1000000).toFixed(2) + ' MH/s';
+            } else if (clampedHashrate > 1000) {
+                hashrateStr = (clampedHashrate / 1000).toFixed(2) + ' KH/s';
+            } else {
+                hashrateStr = clampedHashrate.toFixed(2) + ' H/s';
+            }
+            
+            hashrateEl.textContent = hashrateStr;
+            
+            // Log to console every 10 seconds
+            const elapsed = (Date.now() - startTime) / 1000;
+            if (Math.floor(elapsed) % 10 === 0) {
+                console.log(`⛏️ Hashrate: ${hashrateStr} (raw: ${instantHashrate.toFixed(0)} H/s) | Workers: ${workerHashrates.map((h, i) => `#${i}:${(h || 0).toFixed(0)}H/s`).join(' ')} | Mining for ${Math.floor(elapsed)}s`);
+            }
+        }
+
+        function updateShares() {
+            sharesEl.textContent = `${sharesAccepted} accepted / ${sharesRejected} rejected`;
+        }
+
+        async function startMining() {
+            if (mining) return;
+            
+            const serverUrl = serverUrlInput.value;
+            const workerCount = parseInt(workersInput.value);
+            
+            log(`Starting mining with ${workerCount} workers...`, 'info');
+            updateStatus('Initializing...', 'warning');
+            
+            // Connect to WebSocket server
+            try {
+                await connectToServer(serverUrl);
+            } catch (err) {
+                log(`Failed to connect: ${err.message}`, 'error');
+                updateStatus('Error', 'bad');
+                return;
+            }
+            
+            // Initialize WASM miners
+            try {
+                await initMiners(workerCount);
+            } catch (err) {
+                const errorMsg = err ? (err.message || err.toString() || String(err)) : 'Unknown error';
+                log(`Failed to initialize miners: ${errorMsg}`, 'error');
+                console.error('initMiners error:', err);
+                updateStatus('Error', 'bad');
+                ws.close();
+                return;
+            }
+            
+            mining = true;
+            startTime = Date.now();
+            workerHashrates = new Array(workerCount).fill(0);
+            
+            startBtn.disabled = true;
+            stopBtn.disabled = false;
+            serverUrlInput.disabled = true;
+            workersInput.disabled = true;
+            
+            updateStatus('Mining', 'good');
+            log('Mining started successfully', 'success');
+            
+            // Start hashrate update interval
+            setInterval(updateHashrate, 1000);
+        }
+
+        function stopMining() {
+            if (!mining) return;
+            
+            log('Stopping mining...', 'info');
+            
+            mining = false;
+            
+            // Stop all miners
+            miners.forEach(miner => miner.stop());
+            miners = [];
+            workerHashrates = [];
+            
+            // Close WebSocket
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+            
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            serverUrlInput.disabled = false;
+            workersInput.disabled = false;
+            
+            updateStatus('Stopped', 'warning');
+            updateConnection(false);
+            log('Mining stopped', 'warning');
+        }
+
+        function connectToServer(url) {
+            return new Promise((resolve, reject) => {
+                log(`Connecting to ${url}...`, 'info');
+                
+                ws = new WebSocket(url);
+                
+                ws.onopen = () => {
+                    log('Connected to server', 'success');
+                    updateConnection(true);
+                    resolve();
+                };
+                
+                ws.onerror = (error) => {
+                    log(`WebSocket error: ${error.message || 'Unknown error'}`, 'error');
+                    reject(error);
+                };
+                
+                ws.onclose = () => {
+                    log('Disconnected from server', 'warning');
+                    updateConnection(false);
+                    if (mining) {
+                        // Try to reconnect
+                        setTimeout(() => {
+                            if (mining) {
+                                log('Attempting to reconnect...', 'info');
+                                connectToServer(url).catch(() => {});
+                            }
+                        }, 5000);
+                    }
+                };
+                
+                ws.onmessage = (event) => {
+                    handleServerMessage(JSON.parse(event.data));
+                };
+                
+                // CRITICAL: Add error handler for send failures
+                ws.onerror = (error) => {
+                    console.error('[ERROR] WebSocket error:', error);
+                    log(`WebSocket error: ${error.message || 'Unknown error'}`, 'error');
+                };
+            });
+        }
+
+        function handleServerMessage(message) {
+            switch (message.type) {
+                case 'work':
+                    handleNewWork(message.work);
+                    break;
+                case 'interrupt':
+                    handleJobInterrupt(message.newJobId);
+                    break;
+                case 'share_result':
+                    handleShareResult(message);
+                    break;
+                case 'pong':
+                    // Keep-alive response
+                    break;
+                default:
+                    log(`Unknown message type: ${message.type}`, 'warning');
+            }
+        }
+
+        function handleJobInterrupt(newJobId) {
+            log(`Job interrupt received: stopping current work for new job ${newJobId}`, 'warning');
+            
+            // CRITICAL: Set interrupted flag so handleNewWork knows miners are already stopped
+            interrupted = true;
+            
+            // Immediately stop all miners - abandon current job (clean=true behavior)
+            miners.forEach(miner => {
+                if (miner.mining) {
+                    // Send stop message to worker
+                    miner.worker.postMessage({ type: 'stop' });
+                    // Clear current work tracking
+                    miner.currentWork = null;
+                    miner.mining = false;
+                    // Clear last submitted tracking to prevent stale shares
+                    miner.lastSubmittedNonce = null;
+                    miner.lastSubmittedJobId = null;
+                }
+            });
+            
+            // Update current work to null to prevent stale share submissions
+            currentWork = null;
+        }
+
+        function handleNewWork(work) {
+            // CRITICAL: Match cpu-miner-verus behavior:
+            // - When clean=true: interrupt message already stopped miners, just send new work
+            // - When clean=false: DON'T stop miners, just send new work - they'll pick it up on next iteration
+            // This matches stratum.cpp line 1080-1082: "When job_id changes without clean flag,
+            // threads will pick up new work on next iteration without interrupting their current scan"
+            
+            const wasInterrupted = interrupted;
+            interrupted = false; // Reset flag after checking
+            
+            if (wasInterrupted) {
+                // Clean job: miners were already stopped by interrupt message
+                // Just send new work after a brief delay
+                log(`New work after interrupt: ${work.job_id}`, 'info');
+            } else {
+                // Normal update (clean=false): DON'T stop miners - they'll continue mining
+                // and pick up new work on their next chunk iteration
+                log(`New work update (clean=false): ${work.job_id} - workers will pick up on next iteration`, 'info');
+            }
+            
+            // Add timestamp for staleness checking (like cpu-miner-verus g_work_time)
+            work.timestamp = Date.now();
+            currentWork = work;
+            jobIdEl.textContent = work.job_id;
+            
+            // DEBUG: Log what we received
+            log(`DEBUG: work.extra length: ${work.extra ? work.extra.length : 'undefined'}`, 'warning');
+            if (work.extra && work.extra.length > 0) {
+                const extraHex = work.extra.slice(0, 32).map(b => b.toString(16).padStart(2, '0')).join('');
+                log(`DEBUG: First 32 bytes of extra: ${extraHex}`, 'warning');
+            }
+            
+            // Log target for debugging
+            const targetHex = work.target.map(v => v.toString(16).padStart(8, '0')).join('');
+            log(`New job: ${work.job_id}, diff: ${work.targetdiff.toFixed(3)}`, 'info');
+            log(`Target array: [${work.target.map((v,i) => `[${i}]=0x${v.toString(16).padStart(8,'0')}`).join(' ')}]`, 'warning');
+            
+            // Clear all miners' last submitted nonce tracking on new job (like cpu-miner-verus)
+            miners.forEach(miner => {
+                miner.lastSubmittedNonce = null;
+                miner.lastSubmittedJobId = null;
+                // Don't clear miner.currentWork here - let workers keep it until they pick up new work
+            });
+            
+            // Distribute work to miners - divide the full 32-bit nonce space without overlap
+            // To avoid workers overlapping, divide the 0 to 0xFFFFFFFF range
+            const numWorkers = miners.length;
+            const totalRange = 0xFFFFFFFF;
+            const segmentSize = Math.floor(totalRange / numWorkers);
+            
+            // When clean=false, send new work immediately - workers will pick it up on next chunk
+            // When clean=true, brief delay to ensure interrupt was processed
+            const delay = wasInterrupted ? 50 : 0;
+            
+            setTimeout(() => {
+                miners.forEach((miner, index) => {
+                    const start = index * segmentSize;
+                    // Ensure the last worker goes all the way to the end
+                    const end = (index === numWorkers - 1) ? totalRange : (start + segmentSize - 1);
+                    
+                    // Send new work - if clean=false, worker continues mining and picks it up on next iteration
+                    // If clean=true, worker was already stopped by interrupt, so this starts new work
+                    miner.mine({
+                        ...work,
+                        start_nonce: start,
+                        max_nonce: end,
+                        timestamp: work.timestamp
+                    });
+                });
+            }, delay);
+        }
+
+        function handleShareResult(result) {
+            if (result.accepted) {
+                sharesAccepted++;
+                log(`✓ Share accepted!`, 'success');
+            } else {
+                sharesRejected++;
+                log(`✗ Share rejected: ${result.reason || 'unknown'}`, 'error');
+            }
+            updateShares();
+        }
+
+        async function initMiners(count) {
+            log(`Initializing ${count} WASM miners...`, 'info');
+            
+            for (let i = 0; i < count; i++) {
+                const miner = await createMiner(i);
+                miners.push(miner);
+            }
+            
+            log(`All ${count} miners initialized`, 'success');
+        }
+
+        async function createMiner(id) {
+            return new Promise((resolve, reject) => {
+                let isResolved = false;
+                let isRejected = false;
+                let worker = null;
+                
+                // Set a timeout to prevent hanging forever
+                const timeout = setTimeout(() => {
+                    if (!isResolved && !isRejected) {
+                        isRejected = true;
+                        if (worker) {
+                            worker.terminate();
+                        }
+                        reject(new Error(`Worker ${id} initialization timeout (30s)`));
+                    }
+                }, 30000);
+                
+                // Create Web Worker for this miner (cache-bust with timestamp)
+                // Use absolute URL to avoid path resolution issues
+                const workerScriptRel = 'miner-worker.js?v=' + Date.now();
+                const workerScriptUrl = new URL(workerScriptRel, window.location.href).href;
+                console.log(`[Worker ${id}] Current page URL: ${window.location.href}`);
+                console.log(`[Worker ${id}] Worker script relative: ${workerScriptRel}`);
+                console.log(`[Worker ${id}] Worker script absolute URL: ${workerScriptUrl}`);
+                
+                // Store in outer scope so error handler can access it
+                let workerScriptPath = workerScriptUrl;
+                
+                // First, verify the script is accessible and returns JavaScript
+                fetch(workerScriptUrl)
+                    .then(response => {
+                        console.log(`[Worker ${id}] Fetch response status: ${response.status} ${response.statusText}`);
+                        console.log(`[Worker ${id}] Fetch response Content-Type: ${response.headers.get('Content-Type')}`);
+                        
+                        if (!response.ok) {
+                            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                        }
+                        
+                        const contentType = response.headers.get('Content-Type') || '';
+                        if (!contentType.includes('javascript') && !contentType.includes('text/plain')) {
+                            console.warn(`[Worker ${id}] Warning: Content-Type is '${contentType}', expected 'application/javascript' or 'text/javascript'`);
+                        }
+                        
+                        return response.text();
+                    })
+                    .then(scriptContent => {
+                        console.log(`[Worker ${id}] Script content received (${scriptContent.length} bytes)`);
+                        console.log(`[Worker ${id}] First 200 chars of script:`, scriptContent.substring(0, 200));
+                        
+                        // Check if it looks like JavaScript (not HTML error page)
+                        if (scriptContent.trim().startsWith('<') || scriptContent.includes('<!DOCTYPE') || scriptContent.includes('<html')) {
+                            throw new Error('Response appears to be HTML, not JavaScript. Check if miner-worker.js exists and is being served correctly.');
+                        }
+                        
+                        // Now create the worker
+                        // Try using a Blob URL instead of direct URL to avoid potential issues
+                        try {
+                            console.log(`[Worker ${id}] Creating Worker with Blob URL from script content...`);
+                            
+                            // Try both Blob URL and direct file URL approaches
+                            // First, try Blob URL with text/javascript MIME type
+                            console.log(`[Worker ${id}] Attempting Blob URL approach...`);
+                            try {
+                                const scriptBlob = new Blob([scriptContent], { type: 'text/javascript' });
+                                const blobUrl = URL.createObjectURL(scriptBlob);
+                                console.log(`[Worker ${id}] Created Blob URL: ${blobUrl.substring(0, 50)}...`);
+                                
+                                worker = new Worker(blobUrl);
+                                console.log(`[Worker ${id}] Worker object created successfully with Blob URL`);
+                                
+                                // Don't revoke the Blob URL immediately - keep it alive for the worker
+                                // We'll clean it up when the worker is terminated
+                                
+                            } catch (blobErr) {
+                                console.warn(`[Worker ${id}] Blob URL approach failed: ${blobErr.message}`);
+                                console.log(`[Worker ${id}] Falling back to direct file URL approach...`);
+                                
+                                // Fallback to direct file URL (without query parameter to avoid cache issues)
+                                const directUrl = workerScriptUrl.split('?')[0];
+                                worker = new Worker(directUrl);
+                                console.log(`[Worker ${id}] Worker object created with direct file URL: ${directUrl}`);
+                            }
+                        } catch (createErr) {
+                            clearTimeout(timeout);
+                            const createErrorMsg = createErr ? (createErr.message || createErr.toString() || String(createErr)) : 'Failed to create worker';
+                            log(`Worker ${id} creation failed: ${createErrorMsg}`, 'error');
+                            console.error(`Worker ${id} creation error:`, createErr);
+                            console.error(`Worker ${id} Error stack:`, createErr.stack);
+                            reject(new Error(`Worker ${id} creation failed: ${createErrorMsg}`));
+                            return;
+                        }
+                        
+                        // Create miner object
+                        const miner = {
+                            id: id,
+                            worker: worker,
+                            mining: false,
+                            lastSubmittedNonce: null,
+                            lastSubmittedJobId: null,
+                            currentWork: null,
+                            
+                            mine: function(work) {
+                                if (!mining) return;
+                                
+                                this.mining = true;
+                                this.currentWork = work;
+                                
+                                // Send work to worker
+                                worker.postMessage({
+                                    type: 'mine',
+                                    data: { work: work }
+                                });
+                            },
+                            
+                            stop: function() {
+                                this.mining = false;
+                                worker.postMessage({ type: 'stop' });
+                                worker.terminate();
+                            }
+                        };
+                        
+                        // Set up message handler
+                        worker.onmessage = (e) => {
+                    const msg = e.data;
+                    
+                    switch (msg.type) {
+                        case 'initialized':
+                            if (!isResolved && !isRejected) {
+                                isResolved = true;
+                                clearTimeout(timeout);
+                                workerHashrates[id] = 0;
+                                log(`Worker ${id} initialized`, 'success');
+                                resolve(miner);
+                            }
+                            break;
+                            
+                        case 'found':
+                            try {
+                                console.log(`[DEBUG] Worker ${id} sent 'found' message:`, msg);
+                                handleWorkerFound(miner, msg);
+                            } catch (err) {
+                                log(`Worker ${id} handleWorkerFound error: ${err.message || err}`, 'error');
+                                console.error('handleWorkerFound error:', err);
+                            }
+                            break;
+                            
+                        case 'progress':
+                            // Update this worker's hashrate
+                            workerHashrates[id] = msg.hashrate || 0;
+                            break;
+                            
+                        case 'log':
+                            console.log(msg.message);
+                            break;
+                            
+                        case 'stopped':
+                            // Worker stopped mining (normal - will restart when new work arrives)
+                            // Don't log as error, this is expected behavior
+                            break;
+                            
+                        case 'error':
+                            const errorMsg = msg.error || 'Unknown error';
+                            log(`Worker ${id} error: ${errorMsg}`, 'error');
+                            console.error(`Worker ${id} error:`, errorMsg);
+                            // Reject promise if not yet resolved (during initialization)
+                            if (!isResolved && !isRejected) {
+                                isRejected = true;
+                                clearTimeout(timeout);
+                                worker.terminate();
+                                reject(new Error(`Worker ${id} initialization failed: ${errorMsg}`));
+                            }
+                            break;
+                            
+                        default:
+                            // Only log truly unknown message types (not 'stopped')
+                            if (msg.type !== 'stopped') {
+                                console.log(`Worker ${id} unknown message type:`, msg.type, msg);
+                            }
+                    }
+                };
+                
+                        // Set up error handler
+                        worker.onerror = (errorEvent) => {
+                    // Web Worker error events have different properties than standard Error objects
+                    // Log the entire event object first to see what we're working with
+                    console.error(`Worker ${id} error event (full object):`, errorEvent);
+                    console.error(`Worker ${id} error event properties:`, Object.keys(errorEvent));
+                    console.error(`Worker ${id} error event.message:`, errorEvent.message);
+                    console.error(`Worker ${id} error event.filename:`, errorEvent.filename);
+                    console.error(`Worker ${id} error event.lineno:`, errorEvent.lineno);
+                    console.error(`Worker ${id} error event.colno:`, errorEvent.colno);
+                    console.error(`Worker ${id} error event.error:`, errorEvent.error);
+                    
+                    const parts = [];
+                    if (errorEvent.message) parts.push(`Message: ${errorEvent.message}`);
+                    if (errorEvent.filename) parts.push(`File: ${errorEvent.filename}`);
+                    if (errorEvent.lineno !== undefined && errorEvent.lineno !== null) parts.push(`Line: ${errorEvent.lineno}`);
+                    if (errorEvent.colno !== undefined && errorEvent.colno !== null) parts.push(`Col: ${errorEvent.colno}`);
+                    if (errorEvent.error) {
+                        if (errorEvent.error.message) parts.push(`Error.message: ${errorEvent.error.message}`);
+                        if (errorEvent.error.name) parts.push(`Error.name: ${errorEvent.error.name}`);
+                        if (errorEvent.error.stack) parts.push(`Stack: ${errorEvent.error.stack}`);
+                    }
+                    
+                    // Try to get a string representation of the error event itself
+                    let errorMsg = parts.length > 0 ? parts.join(', ') : 'Unknown worker error';
+                    if (parts.length === 0) {
+                        // Fallback: try to stringify the error event
+                        try {
+                            errorMsg = `Worker script failed to load. This usually means:
+1. miner-worker.js file doesn't exist (check Network tab for 404)
+2. Wrong Content-Type header (should be application/javascript)
+3. CORS/security issue (check browser console)
+4. Syntax error in miner-worker.js
+
+Check the browser's Network tab (F12) to see the actual HTTP response when loading: ${workerScriptPath}`;
+                        } catch (e) {
+                            errorMsg = `Worker script failed to load. Check browser Network tab (F12) for details about: ${workerScriptPath}`;
+                        }
+                    }
+                    
+                    log(`Worker ${id} error: ${errorMsg}`, 'error');
+                    console.error(`Worker ${id} formatted error: ${errorMsg}`);
+                    console.error(`Worker ${id} TROUBLESHOOTING: Open browser DevTools (F12), go to Network tab, and check the request for: ${workerScriptPath}`);
+                    
+                    if (!isResolved && !isRejected) {
+                        isRejected = true;
+                        clearTimeout(timeout);
+                        if (worker) {
+                            worker.terminate();
+                        }
+                        reject(new Error(`Worker ${id} error: ${errorMsg}`));
+                    }
+                        };
+                        
+                        // Initialize the worker with base URL for importScripts
+                        // Calculate base URL (directory where the page is served from)
+                        let baseUrl = window.location.origin;
+                        const pathParts = window.location.pathname.split('/');
+                        pathParts.pop(); // Remove filename
+                        baseUrl += pathParts.join('/');
+                        if (!baseUrl.endsWith('/')) {
+                            baseUrl += '/';
+                        }
+                        console.log(`[Worker ${id}] Base URL for resources: ${baseUrl}`);
+                        
+                        worker.postMessage({
+                            type: 'init',
+                            data: { 
+                                workerId: id,
+                                baseUrl: baseUrl
+                            }
+                        });
+                    })
+                    .catch(fetchErr => {
+                        clearTimeout(timeout);
+                        const fetchErrorMsg = fetchErr ? (fetchErr.message || fetchErr.toString() || String(fetchErr)) : 'Failed to fetch worker script';
+                        log(`Worker ${id} script not accessible: ${fetchErrorMsg}`, 'error');
+                        console.error(`Worker ${id} fetch error:`, fetchErr);
+                        console.error(`Worker ${id} TROUBLESHOOTING: Open DevTools (F12) > Network tab and check the request for: ${workerScriptUrl}`);
+                        reject(new Error(`Worker ${id} script not accessible: ${fetchErrorMsg}. Make sure miner-worker.js exists and is accessible.`));
+                    });
+            });
+        }
+        
+        function handleWorkerFound(miner, msg) {
+            console.log(`[DEBUG] handleWorkerFound called for worker ${miner.id}`, msg);
+            const { nonce, extra, job_id, hashes_done, work } = msg;
+            console.log(`[DEBUG] Extracted: nonce=${nonce}, job_id=${job_id}, extra.length=${extra ? extra.length : 'undefined'}, has_work=${!!work}`);
+            
+            // Validate we have the work object
+            if (!work) {
+                log(`Worker ${miner.id}: Skipping share - no work data in message`, 'error');
+                console.error(`[ERROR] Worker ${miner.id}: No work object in share message`);
+                return;
+            }
+            
+            // Check for duplicate nonce submission
+            if (miner.lastSubmittedNonce === nonce && miner.lastSubmittedJobId === job_id) {
+                log(`Worker ${miner.id}: Skipping duplicate nonce 0x${nonce.toString(16)}`, 'warning');
+                console.log(`[DEBUG] Duplicate nonce check: nonce=${nonce}, job_id=${job_id}, miner.lastSubmittedNonce=${miner.lastSubmittedNonce}, miner.lastSubmittedJobId=${miner.lastSubmittedJobId}`);
+                return;
+            }
+            
+            // NOTE: Removed client-side staleness check - server will validate share validity
+            // The server has proper logic to track clean jobs and previous jobs to determine
+            // if a share is valid, even if the work is older than 2 minutes. The client shouldn't
+            // reject shares based on age - that's the server's responsibility.
+            // Workers might find shares for older work that's still valid (e.g., work that came
+            // after the last clean job), and those shares should reach the server for proper validation.
+            
+            if (work.timestamp) {
+                const workAge = (Date.now() - work.timestamp) / 1000;
+                console.log(`[DEBUG] Work age: ${workAge.toFixed(2)}s for job ${work.job_id} (server will validate if still valid)`);
+            }
+            
+            // Log current work for debugging
+            console.log(`[DEBUG] Current work: ${currentWork ? currentWork.job_id : 'none'}, Share job_id: ${job_id}`);
+            
+            log(`Worker ${miner.id} found share! Nonce: 0x${nonce.toString(16)} for job ${work.job_id}`, 'success');
+            console.log(`[DEBUG] About to submit share for job ${work.job_id}...`);
+            
+            // Track submission to prevent duplicates
+            miner.lastSubmittedNonce = nonce;
+            miner.lastSubmittedJobId = job_id;
+            
+            // CRITICAL: Use the work snapshot from the message!
+            // This is the exact work the miner was using when it found the share.
+            // The server will validate if the job is still valid or stale.
+            submitShare(work, nonce, extra);
+        }
+
+        function submitShare(work, nonce, extra) {
+            // CRITICAL: Check WebSocket connection state
+            if (!ws) {
+                log('Cannot submit share: WebSocket is null', 'error');
+                console.error('[ERROR] WebSocket is null!');
+                return;
+            }
+            
+            if (ws.readyState !== WebSocket.OPEN) {
+                log(`Cannot submit share: WebSocket not connected (readyState: ${ws.readyState})`, 'error');
+                console.error(`[ERROR] WebSocket not connected! readyState: ${ws.readyState}`);
+                return;
+            }
+            
+            console.log(`[DEBUG] submitShare called: job_id=${work.job_id}, nonce=0x${nonce.toString(16)}, extra.length=${extra ? extra.length : 'from work'}`);
+            
+            // CRITICAL: Convert extra to standard Array for JSON serialization
+            // Uint8Array or TypedArray might not serialize correctly via JSON.stringify
+            let extraArray = null;
+            if (extra) {
+                if (Array.isArray(extra)) {
+                    extraArray = extra;
+                } else if (extra instanceof Uint8Array || extra instanceof ArrayBuffer) {
+                    extraArray = Array.from(extra);
+                } else if (Buffer.isBuffer && Buffer.isBuffer(extra)) {
+                    extraArray = Array.from(extra);
+                } else {
+                    // Try to convert to array
+                    try {
+                        extraArray = Array.from(extra);
+                    } catch (e) {
+                        console.error(`[ERROR] Cannot convert extra to array:`, e);
+                        log(`Failed to convert extra data: ${e.message}`, 'error');
+                        return;
+                    }
+                }
+                
+                if (!extraArray || extraArray.length < 1347) {
+                    console.error(`[ERROR] Invalid extra array: length=${extraArray ? extraArray.length : 0}, need >= 1347`);
+                    log(`Invalid extra data: ${extraArray ? extraArray.length : 0} bytes (need 1347)`, 'error');
+                    return;
+                }
+                
+                console.log(`[DEBUG] Converted extra to array: ${extraArray.length} bytes`);
+            } else {
+                console.error(`[ERROR] No extra data provided!`);
+                log(`No extra data in share`, 'error');
+                return;
+            }
+            
+            // Build share message - ensure all data is JSON-serializable
+            const shareMessage = {
+                type: 'share',
+                work: work,
+                nonce: nonce,
+                extra: extraArray  // Converted to standard Array for JSON serialization
+            };
+            
+            try {
+                console.log(`[DEBUG] Attempting to stringify share message...`);
+                console.log(`[DEBUG]   shareMessage.type: ${shareMessage.type}`);
+                console.log(`[DEBUG]   shareMessage.nonce: 0x${shareMessage.nonce.toString(16)}`);
+                console.log(`[DEBUG]   shareMessage.work.job_id: ${shareMessage.work.job_id}`);
+                console.log(`[DEBUG]   shareMessage.extra.length: ${shareMessage.extra.length}`);
+                
+                // Test stringify first to catch any serialization errors
+                let messageStr = null;
+                try {
+                    messageStr = JSON.stringify(shareMessage);
+                    console.log(`[DEBUG] JSON stringify successful. Message size: ${messageStr.length} bytes`);
+                } catch (stringifyErr) {
+                    console.error(`[ERROR] JSON.stringify failed:`, stringifyErr);
+                    console.error(`[ERROR] Failed to serialize share message:`, stringifyErr.message);
+                    log(`Failed to serialize share message: ${stringifyErr.message}`, 'error');
+                    return;
+                }
+                
+                // Send the message
+                console.log(`[DEBUG] About to call ws.send()...`);
+                console.log(`[DEBUG]   ws.readyState: ${ws.readyState} (1 = OPEN)`);
+                console.log(`[DEBUG]   Message preview: ${messageStr.substring(0, 200)}...`);
+                
+                ws.send(messageStr);
+                
+                console.log(`[SUCCESS] ws.send() completed - share message sent to server!`);
+                console.log(`[SUCCESS] Share submitted: job_id=${work.job_id}, nonce=0x${nonce.toString(16)}, extra=${extraArray.length} bytes`);
+                log(`Share submitted to server: nonce=0x${nonce.toString(16)}, job=${work.job_id}`, 'success');
+            } catch (err) {
+                log(`Failed to send share: ${err.message}`, 'error');
+                console.error(`[ERROR] Exception in submitShare:`, err);
+                console.error(`[ERROR] Error name: ${err.name}, message: ${err.message}`);
+                console.error(`[ERROR] Error stack:`, err.stack);
+                console.error(`[ERROR] Share message data:`, {
+                    type: shareMessage.type,
+                    hasWork: !!shareMessage.work,
+                    nonce: shareMessage.nonce,
+                    extraLength: shareMessage.extra ? shareMessage.extra.length : 0,
+                    extraType: Array.isArray(shareMessage.extra) ? 'Array' : typeof shareMessage.extra
+                });
+            }
+        }
+
+        // Auto-start if URL parameter is set
+        const urlParams = new URLSearchParams(window.location.search);
+        if (urlParams.get('autostart') === '1') {
+            window.addEventListener('load', () => {
+                setTimeout(startMining, 1000);
+            });
+        }
+    </script>
+</body>
+</html>

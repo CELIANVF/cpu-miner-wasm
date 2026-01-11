@@ -1,0 +1,25 @@
+{
+  "name": "verus-miner-websocket-server",
+  "version": "1.0.0",
+  "description": "WebSocket server bridging Verus mining pool and web miners",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "keywords": [
+    "verus",
+    "mining",
+    "websocket",
+    "stratum"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "ws": "^8.14.2",
+    "net": "^1.0.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}

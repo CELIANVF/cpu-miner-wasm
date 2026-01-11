@@ -1,0 +1,45 @@
+# Build artifacts
+/build/
+/dist/
+/out/
+*.o
+*.obj
+*.so
+*.dll
+*.exe
+*.a
+*.class
+
+# WASM build artifacts
+*.wasm
+*.wasm.map
+
+# Node
+node_modules/
+/server/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+thumbs.db
+.coverage
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local
+.venv/
+env/
+
+# Temporary
+*.tmp
+*.temp
+
+# npm package lock
+package-lock.json

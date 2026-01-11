@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Verus Web Miner - Example Client</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+        }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 5px;
+        }
+        .connected {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        .disconnected {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+            margin: 20px 0;
+        }
+        .stat-box {
+            padding: 15px;
+            background-color: #f8f9fa;
+            border-radius: 5px;
+        }
+        .stat-label {
+            font-size: 12px;
+            color: #666;
+        }
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            cursor: pointer;
+            border: none;
+            border-radius: 5px;
+            margin: 5px;
+        }
+        .btn-start {
+            background-color: #28a745;
+            color: white;
+        }
+        .btn-stop {
+            background-color: #dc3545;
+            color: white;
+        }
+        .log {
+            background-color: #f8f9fa;
+            padding: 10px;
+            border-radius: 5px;
+            max-height: 300px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Verus Web Miner</h1>
+    
+    <div id="status" class="status disconnected">Disconnected</div>
+    
+    <div class="stats">
+        <div class="stat-box">
+            <div class="stat-label">Hashrate</div>
+            <div class="stat-value" id="hashrate">0 H/s</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-label">Shares Found</div>
+            <div class="stat-value" id="shares">0</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-label">Hashes Computed</div>
+            <div class="stat-value" id="hashes">0</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-label">Current Job</div>
+            <div class="stat-value" id="job-id">-</div>
+        </div>
+    </div>
+    
+    <div>
+        <button id="btn-start" class="btn-start" onclick="startMining()">Start Mining</button>
+        <button id="btn-stop" class="btn-stop" onclick="stopMining()" disabled>Stop Mining</button>
+    </div>
+    
+    <h2>Log</h2>
+    <div id="log" class="log"></div>
+    
+    <script src="../verus-miner.js"></script>
+    <script src="../verus-miner-js-example.js"></script>
+    <script>
+        // Configuration
+        const WS_URL = 'ws://172.21.112.214:8080';
+        
+        // State
+        let ws = null;
+        let miner = null;
+        let isMining = false;
+        let currentWork = null;
+        let stats = {
+            hashrate: 0,
+            shares: 0,
+            hashes: 0,
+            jobId: '-'
+        };
+        
+        // Initialize WASM miner
+        createVerusMinerModule().then(module => {
+            miner = new VerusMiner(module);
+            log('WASM miner initialized');
+            connect();
+        }).catch(err => {
+            log(`Failed to initialize WASM miner: ${err.message}`, 'error');
+        });
+        
+        // WebSocket connection
+        function connect() {
+            ws = new WebSocket(WS_URL);
+            
+            ws.onopen = () => {
+                log('Connected to mining server');
+                updateStatus(true);
+            };
+            
+            ws.onmessage = (event) => {
+                const message = JSON.parse(event.data);
+                
+                if (message.type === 'work') {
+                    currentWork = message.work;
+                    stats.jobId = currentWork.job_id.substring(0, 8);
+                    updateStats();
+                    log(`New work received: ${currentWork.job_id}`);
+                    
+                    if (isMining) {
+                        mineWork();
+                    }
+                } else if (message.type === 'pong') {
+                    // Server responded to ping
+                }
+            };
+            
+            ws.onerror = (error) => {
+                log(`WebSocket error: ${error}`, 'error');
+            };
+            
+            ws.onclose = () => {
+                log('Disconnected from mining server');
+                updateStatus(false);
+                setTimeout(connect, 5000); // Reconnect after 5 seconds
+            };
+        }
+        
+        // Mining functions
+        function startMining() {
+            if (!miner || !ws || ws.readyState !== WebSocket.OPEN) {
+                log('Cannot start: not connected', 'error');
+                return;
+            }
+            
+            isMining = true;
+            document.getElementById('btn-start').disabled = true;
+            document.getElementById('btn-stop').disabled = false;
+            log('Mining started');
+            
+            if (currentWork) {
+                mineWork();
+            }
+        }
+        
+        function stopMining() {
+            isMining = false;
+            document.getElementById('btn-start').disabled = false;
+            document.getElementById('btn-stop').disabled = true;
+            log('Mining stopped');
+        }
+        
+        async function mineWork() {
+            if (!isMining || !currentWork) return;
+            
+            try {
+                // Mine a batch of nonces
+                const batchSize = 100000;
+                currentWork.start_nonce = currentWork.start_nonce || 0;
+                currentWork.max_nonce = Math.min(
+                    currentWork.start_nonce + batchSize,
+                    0xFFFFFFFF
+                );
+                
+                const result = miner.mine(currentWork);
+                
+                stats.hashes += result.hashes_done;
+                stats.hashrate = result.hashrate;
+                updateStats();
+                
+                if (result.found) {
+                    stats.shares++;
+                    updateStats();
+                    log(`Share found! Nonce: 0x${result.nonce.toString(16)}`);
+                    
+                    // Submit share
+                    ws.send(JSON.stringify({
+                        type: 'share',
+                        work: currentWork,
+                        nonce: result.nonce
+                    }));
+                }
+                
+                // Continue mining
+                currentWork.start_nonce = result.next_nonce;
+                
+                // Use setTimeout to avoid blocking
+                setTimeout(() => {
+                    if (isMining) {
+                        mineWork();
+                    }
+                }, 0);
+                
+            } catch (error) {
+                log(`Mining error: ${error.message}`, 'error');
+                setTimeout(() => {
+                    if (isMining) {
+                        mineWork();
+                    }
+                }, 1000);
+            }
+        }
+        
+        // UI updates
+        function updateStatus(connected) {
+            const statusEl = document.getElementById('status');
+            if (connected) {
+                statusEl.textContent = 'Connected';
+                statusEl.className = 'status connected';
+            } else {
+                statusEl.textContent = 'Disconnected';
+                statusEl.className = 'status disconnected';
+            }
+        }
+        
+        function updateStats() {
+            document.getElementById('hashrate').textContent = formatHashrate(stats.hashrate);
+            document.getElementById('shares').textContent = stats.shares;
+            document.getElementById('hashes').textContent = formatNumber(stats.hashes);
+            document.getElementById('job-id').textContent = stats.jobId;
+        }
+        
+        function formatHashrate(hashrate) {
+            if (hashrate < 1000) {
+                return `${hashrate.toFixed(2)} H/s`;
+            } else if (hashrate < 1000000) {
+                return `${(hashrate / 1000).toFixed(2)} KH/s`;
+            } else if (hashrate < 1000000000) {
+                return `${(hashrate / 1000000).toFixed(2)} MH/s`;
+            } else {
+                return `${(hashrate / 1000000000).toFixed(2)} GH/s`;
+            }
+        }
+        
+        function formatNumber(num) {
+            if (num < 1000) return num.toString();
+            if (num < 1000000) return `${(num / 1000).toFixed(2)}K`;
+            if (num < 1000000000) return `${(num / 1000000).toFixed(2)}M`;
+            return `${(num / 1000000000).toFixed(2)}B`;
+        }
+        
+        function log(message, type = 'info') {
+            const logEl = document.getElementById('log');
+            const time = new Date().toLocaleTimeString();
+            const prefix = type === 'error' ? '❌' : 'ℹ️';
+            logEl.innerHTML += `[${time}] ${prefix} ${message}<br>`;
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+        
+        // Ping server periodically
+        setInterval(() => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'ping' }));
+            }
+        }, 30000);
+    </script>
+</body>
+</html>
