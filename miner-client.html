@@ -437,6 +437,18 @@
                 ws.onopen = () => {
                     log('Connected to server', 'success');
                     updateConnection(true);
+                    // Send persistent client identity (device name) so server can use it as worker suffix
+                    try {
+                        let clientId = localStorage.getItem('minerClientId');
+                        if (!clientId) {
+                            clientId = 'dev-' + Math.random().toString(36).slice(2, 10);
+                            localStorage.setItem('minerClientId', clientId);
+                        }
+                        log(`Identifying as ${clientId}`, 'info');
+                        ws.send(JSON.stringify({ type: 'identify', clientId }));
+                    } catch (e) {
+                        console.warn('Failed to send identify message to server:', e);
+                    }
                     resolve();
                 };
                 
@@ -558,28 +570,303 @@
                 // Don't clear miner.currentWork here - let workers keep it until they pick up new work
             });
             
-            // Distribute work to miners - divide the full 32-bit nonce space without overlap
-            // To avoid workers overlapping, divide the 0 to 0xFFFFFFFF range
+            // Distribute work to miners - respect server-provided nonce subrange
+            // Server may already give this client a subrange via work.start_nonce/work.max_nonce.
             const numWorkers = miners.length;
-            const totalRange = 0xFFFFFFFF;
-            const segmentSize = Math.floor(totalRange / numWorkers);
-            
+            if (numWorkers === 0) {
+                log('No workers available to assign work to', 'warning');
+                return;
+            }
+
+            // Base range to split among local workers: prefer server-provided range when available
+            const baseStart = (typeof work.start_nonce === 'number') ? work.start_nonce >>> 0 : 0;
+            const baseEnd = (typeof work.max_nonce === 'number') ? work.max_nonce >>> 0 : 0xFFFFFFFF;
+
+            // Inclusive range length
+            const totalCount = (baseEnd >= baseStart) ? (baseEnd - baseStart + 1) : 0x100000000;
+            const segmentSize = Math.floor(totalCount / numWorkers);
+
             // When clean=false, send new work immediately - workers will pick it up on next chunk
             // When clean=true, brief delay to ensure interrupt was processed
             const delay = wasInterrupted ? 50 : 0;
-            
+
             setTimeout(() => {
                 miners.forEach((miner, index) => {
-                    const start = index * segmentSize;
-                    // Ensure the last worker goes all the way to the end
-                    const end = (index === numWorkers - 1) ? totalRange : (start + segmentSize - 1);
-                    
+                    const start = (index === 0) ? baseStart : (baseStart + index * segmentSize);
+                    // Ensure the last worker goes all the way to the baseEnd
+                    const end = (index === numWorkers - 1) ? baseEnd : (start + segmentSize - 1);
+
                     // Send new work - if clean=false, worker continues mining and picks it up on next iteration
                     // If clean=true, worker was already stopped by interrupt, so this starts new work
                     miner.mine({
                         ...work,
-                        start_nonce: start,
-                        max_nonce: end,
+                        start_nonce: start >>> 0,
+                        max_nonce: end >>> 0,
+                        timestamp: work.timestamp
+                    });
+                });
+            }, delay);
+        }
+
+        function handleShareResult(result) {
+            if (result.accepted) {
+                sharesAccepted++;
+                log(`✓ Share accepted!`, 'success');
+            } else {
+                sharesRejected++;
+                log(`✗ Share rejected: ${result.reason || 'unknown'}`, 'error');
+            }
+            updateShares();
+        }
+
+        async function startMining() {
+            if (mining) return;
+            
+            const serverUrl = serverUrlInput.value;
+            const workerCount = parseInt(workersInput.value);
+            
+            log(`Starting mining with ${workerCount} workers...`, 'info');
+            updateStatus('Initializing...', 'warning');
+            
+            // Connect to WebSocket server
+            try {
+                await connectToServer(serverUrl);
+            } catch (err) {
+                log(`Failed to connect: ${err.message}`, 'error');
+                updateStatus('Error', 'bad');
+                return;
+            }
+            
+            // Initialize WASM miners
+            try {
+                await initMiners(workerCount);
+            } catch (err) {
+                const errorMsg = err ? (err.message || err.toString() || String(err)) : 'Unknown error';
+                log(`Failed to initialize miners: ${errorMsg}`, 'error');
+                console.error('initMiners error:', err);
+                updateStatus('Error', 'bad');
+                ws.close();
+                return;
+            }
+            
+            mining = true;
+            startTime = Date.now();
+            workerHashrates = new Array(workerCount).fill(0);
+            
+            startBtn.disabled = true;
+            stopBtn.disabled = false;
+            serverUrlInput.disabled = true;
+            workersInput.disabled = true;
+            
+            updateStatus('Mining', 'good');
+            log('Mining started successfully', 'success');
+            
+            // Start hashrate update interval
+            setInterval(updateHashrate, 1000);
+        }
+
+        function stopMining() {
+            if (!mining) return;
+            
+            log('Stopping mining...', 'info');
+            
+            mining = false;
+            
+            // Stop all miners
+            miners.forEach(miner => miner.stop());
+            miners = [];
+            workerHashrates = [];
+            
+            // Close WebSocket
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+            
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            serverUrlInput.disabled = false;
+            workersInput.disabled = false;
+            
+            updateStatus('Stopped', 'warning');
+            updateConnection(false);
+            log('Mining stopped', 'warning');
+        }
+
+        function connectToServer(url) {
+            return new Promise((resolve, reject) => {
+                log(`Connecting to ${url}...`, 'info');
+                
+                ws = new WebSocket(url);
+                
+                ws.onopen = () => {
+                    log('Connected to server', 'success');
+                    updateConnection(true);
+                    // Send persistent client identity (device name) so server can use it as worker suffix
+                    try {
+                        let clientId = localStorage.getItem('minerClientId');
+                        if (!clientId) {
+                            clientId = 'dev-' + Math.random().toString(36).slice(2, 10);
+                            localStorage.setItem('minerClientId', clientId);
+                        }
+                        log(`Identifying as ${clientId}`, 'info');
+                        ws.send(JSON.stringify({ type: 'identify', clientId }));
+                    } catch (e) {
+                        console.warn('Failed to send identify message to server:', e);
+                    }
+                    resolve();
+                };
+                
+                ws.onerror = (error) => {
+                    log(`WebSocket error: ${error.message || 'Unknown error'}`, 'error');
+                    reject(error);
+                };
+                
+                ws.onclose = () => {
+                    log('Disconnected from server', 'warning');
+                    updateConnection(false);
+                    if (mining) {
+                        // Try to reconnect
+                        setTimeout(() => {
+                            if (mining) {
+                                log('Attempting to reconnect...', 'info');
+                                connectToServer(url).catch(() => {});
+                            }
+                        }, 5000);
+                    }
+                };
+                
+                ws.onmessage = (event) => {
+                    handleServerMessage(JSON.parse(event.data));
+                };
+                
+                // CRITICAL: Add error handler for send failures
+                ws.onerror = (error) => {
+                    console.error('[ERROR] WebSocket error:', error);
+                    log(`WebSocket error: ${error.message || 'Unknown error'}`, 'error');
+                };
+            });
+        }
+
+        function handleServerMessage(message) {
+            switch (message.type) {
+                case 'work':
+                    handleNewWork(message.work);
+                    break;
+                case 'interrupt':
+                    handleJobInterrupt(message.newJobId);
+                    break;
+                case 'share_result':
+                    handleShareResult(message);
+                    break;
+                case 'pong':
+                    // Keep-alive response
+                    break;
+                default:
+                    log(`Unknown message type: ${message.type}`, 'warning');
+            }
+        }
+
+        function handleJobInterrupt(newJobId) {
+            log(`Job interrupt received: stopping current work for new job ${newJobId}`, 'warning');
+            
+            // CRITICAL: Set interrupted flag so handleNewWork knows miners are already stopped
+            interrupted = true;
+            
+            // Immediately stop all miners - abandon current job (clean=true behavior)
+            miners.forEach(miner => {
+                if (miner.mining) {
+                    // Send stop message to worker
+                    miner.worker.postMessage({ type: 'stop' });
+                    // Clear current work tracking
+                    miner.currentWork = null;
+                    miner.mining = false;
+                    // Clear last submitted tracking to prevent stale shares
+                    miner.lastSubmittedNonce = null;
+                    miner.lastSubmittedJobId = null;
+                }
+            });
+            
+            // Update current work to null to prevent stale share submissions
+            currentWork = null;
+        }
+
+        function handleNewWork(work) {
+            // CRITICAL: Match cpu-miner-verus behavior:
+            // - When clean=true: interrupt message already stopped miners, just send new work
+            // - When clean=false: DON'T stop miners, just send new work - they'll pick it up on next iteration
+            // This matches stratum.cpp line 1080-1082: "When job_id changes without clean flag,
+            // threads will pick up new work on next iteration without interrupting their current scan"
+            
+            const wasInterrupted = interrupted;
+            interrupted = false; // Reset flag after checking
+            
+            if (wasInterrupted) {
+                // Clean job: miners were already stopped by interrupt message
+                // Just send new work after a brief delay
+                log(`New work after interrupt: ${work.job_id}`, 'info');
+            } else {
+                // Normal update (clean=false): DON'T stop miners - they'll continue mining
+                // and pick up new work on their next chunk iteration
+                log(`New work update (clean=false): ${work.job_id} - workers will pick up on next iteration`, 'info');
+            }
+            
+            // Add timestamp for staleness checking (like cpu-miner-verus g_work_time)
+            work.timestamp = Date.now();
+            currentWork = work;
+            jobIdEl.textContent = work.job_id;
+            
+            // DEBUG: Log what we received
+            log(`DEBUG: work.extra length: ${work.extra ? work.extra.length : 'undefined'}`, 'warning');
+            if (work.extra && work.extra.length > 0) {
+                const extraHex = work.extra.slice(0, 32).map(b => b.toString(16).padStart(2, '0')).join('');
+                log(`DEBUG: First 32 bytes of extra: ${extraHex}`, 'warning');
+            }
+            
+            // Log target for debugging
+            const targetHex = work.target.map(v => v.toString(16).padStart(8, '0')).join('');
+            log(`New job: ${work.job_id}, diff: ${work.targetdiff.toFixed(3)}`, 'info');
+            log(`Target array: [${work.target.map((v,i) => `[${i}]=0x${v.toString(16).padStart(8,'0')}`).join(' ')}]`, 'warning');
+            
+            // Clear all miners' last submitted nonce tracking on new job (like cpu-miner-verus)
+            miners.forEach(miner => {
+                miner.lastSubmittedNonce = null;
+                miner.lastSubmittedJobId = null;
+                // Don't clear miner.currentWork here - let workers keep it until they pick up new work
+            });
+            
+            // Distribute work to miners - respect server-provided nonce subrange
+            // Server may already give this client a subrange via work.start_nonce/work.max_nonce.
+            const numWorkers = miners.length;
+            if (numWorkers === 0) {
+                log('No workers available to assign work to', 'warning');
+                return;
+            }
+
+            // Base range to split among local workers: prefer server-provided range when available
+            const baseStart = (typeof work.start_nonce === 'number') ? work.start_nonce >>> 0 : 0;
+            const baseEnd = (typeof work.max_nonce === 'number') ? work.max_nonce >>> 0 : 0xFFFFFFFF;
+
+            // Inclusive range length
+            const totalCount = (baseEnd >= baseStart) ? (baseEnd - baseStart + 1) : 0x100000000;
+            const segmentSize = Math.floor(totalCount / numWorkers);
+
+            // When clean=false, send new work immediately - workers will pick it up on next chunk
+            // When clean=true, brief delay to ensure interrupt was processed
+            const delay = wasInterrupted ? 50 : 0;
+
+            setTimeout(() => {
+                miners.forEach((miner, index) => {
+                    const start = (index === 0) ? baseStart : (baseStart + index * segmentSize);
+                    // Ensure the last worker goes all the way to the baseEnd
+                    const end = (index === numWorkers - 1) ? baseEnd : (start + segmentSize - 1);
+
+                    // Send new work - if clean=false, worker continues mining and picks it up on next iteration
+                    // If clean=true, worker was already stopped by interrupt, so this starts new work
+                    miner.mine({
+                        ...work,
+                        start_nonce: start >>> 0,
+                        max_nonce: end >>> 0,
                         timestamp: work.timestamp
                     });
                 });
@@ -1021,6 +1308,16 @@ Check the browser's Network tab (F12) to see the actual HTTP response when loadi
                 });
             }
         }
+
+        // Set default server URL to current web page's hostname and port
+        window.addEventListener('DOMContentLoaded', () => {
+            let wsProto = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+            let host = window.location.hostname;
+            // Always use port 3000, ignore current window.location.port
+            let port = '3000';
+            serverUrlInput.value = `${wsProto}${host}:${port}`;
+            serverUrlInput.placeholder = `${wsProto}${host}:${port}`;
+        });
 
         // Auto-start if URL parameter is set
         const urlParams = new URLSearchParams(window.location.search);

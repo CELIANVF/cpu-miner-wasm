@@ -68,6 +68,9 @@ class StratumClient {
         this.reconnectTimer = null;
         this.pingTimer = null;
         this.lastNotifyParams = null; // Store last mining.notify parameters for rebuilding
+        this.authorizedWorkers = new Set(); // Track which worker usernames we've authorized on this session
+        this.acceptedShares = 0;
+        this.rejectedShares = 0;
     }
 
     connect() {
@@ -81,6 +84,8 @@ class StratumClient {
         this.socket.on('connect', () => {
             this.log('Connected to pool');
             this.connected = true;
+            // Clear per-worker authorize cache on reconnect
+            if (this.authorizedWorkers && this.authorizedWorkers.clear) this.authorizedWorkers.clear();
             this.subscribe();
         });
 
@@ -392,38 +397,32 @@ class StratumClient {
         // For Equihash/Verus: target = 0xffff0000 / difficulty
         // Reference: equi-stratum.cpp line 50: m = (uint64_t)(4294901760.0 / diff);
         // 4294901760 = 0xFFFF0000
-        const MAX_TARGET = BigInt("0xffff0000"); // Base target for difficulty 1
-        const diffBig = BigInt(Math.floor(difficulty));
-        let targetBig = MAX_TARGET / diffBig;
-        
-        if (targetBig === BigInt(0)) {
-            targetBig = BigInt(1); // Minimum target
-        }
+        // Use floating division to support fractional difficulties correctly.
+        const MAX_TARGET_NUM = 4294901760; // 0xffff0000
+        const diffNum = Number(difficulty);
+        if (!isFinite(diffNum) || diffNum <= 0) return null;
 
-        // Build 256-bit target buffer
-        // For difficulty 1: 00ffff0000000000000000000000000000000000000000000000000000000000
-        // The target is placed in bytes 24-27 (little-endian for uint32, but big-endian in buffer)
+        // Compute raw target value (may exceed 32-bit for diff < 1); cap to 32-bit range
+        let raw = Math.floor(MAX_TARGET_NUM / diffNum);
+        if (raw <= 0) raw = 1;
+        if (raw > 0xFFFFFFFF) raw = 0xFFFFFFFF;
+
+        // Build 256-bit target buffer and write the 32-bit value at bytes 24-27 (big-endian)
         const targetBuf = Buffer.alloc(32, 0);
-        
-        // Convert BigInt to number (should fit in 32 bits)
-        const targetValue = Number(targetBig & BigInt(0xFFFFFFFF));
-        
-        // Write target value at bytes 24-27 as big-endian
-        // This matches how Equihash pools format targets
-        targetBuf.writeUInt32BE(targetValue, 24);
-        
-        // Now reverse the entire buffer to match Verus format (like mining.set_target does)
+        targetBuf.writeUInt32BE(raw >>> 0, 24);
+
+        // Reverse entire buffer to match Verus format (same convention used elsewhere)
         const reversedBuf = Buffer.alloc(32);
         for (let i = 0; i < 32; i++) {
             reversedBuf[31 - i] = targetBuf[i];
         }
-        
+
         if (config.debug) {
             const targetHex = reversedBuf.toString('hex');
             this.log(`Calculated target from diff ${difficulty}: ${targetHex}`);
-            this.log(`  Target value: 0x${targetValue.toString(16)} (${targetValue})`);
+            this.log(`  Target value: 0x${raw.toString(16)} (${raw})`);
         }
-        
+
         return reversedBuf;
     }
 
@@ -705,7 +704,7 @@ class StratumClient {
         return hash4.digest();
     }
 
-    submitShare(work, nonce, extra) {
+    submitShare(work, nonce, extra, worker, resultCallback) {
         if (!this.authorized) {
             return false;
         }
@@ -862,12 +861,20 @@ class StratumClient {
         // Parameters for Verus: [worker_name, job_id, ntime, nonce, solution]
         // NOTE: Verus Stratum does NOT use extranonce2 in mining.submit!
         // See cpu-miner-verus stratum.cpp line 1229: [user, jobid, timehex, noncestr, solhex]
+        // Allow per-share override of the worker by passing `worker` (device id / suffix).
+        // If provided, append it to the base wallet (before any existing dot): base.workerSuffix
+        let submitUser = config.poolUser;
+        if (worker && typeof worker === 'string' && worker.length) {
+            const base = config.poolUser ? String(config.poolUser).split('.')[0] : '';
+            submitUser = base ? `${base}.${worker}` : worker;
+        }
+
         const params = [
-            config.poolUser,            // Your Verus address.worker
-            work.job_id,                 // job_id from mining.notify
-            ntimeHex,                    // ntime (byte-swapped from work.data[25])
-            nonceHex,                    // 4-byte nonce hex (Little-Endian)
-            solutionHex                  // 1347-byte solution hex
+            submitUser,                 // worker: base wallet + optional device suffix
+            work.job_id,                // job_id from mining.notify
+            ntimeHex,                   // ntime (byte-swapped from work.data[25])
+            nonceHex,                   // 4-byte nonce hex (Little-Endian)
+            solutionHex                 // 1347-byte solution hex
         ];
 
         console.log(`[DEBUG] About to send mining.submit to pool with params:`, params.map(p => 
@@ -877,20 +884,62 @@ class StratumClient {
         // Log what we're about to send
         console.log(`[DEBUG] submitShare calling sendRequest('mining.submit', ...)`);
         
-        this.sendRequest('mining.submit', params, (error, result) => {
-            if (error) {
-                console.error(`[ERROR] Share submission error from pool:`, error);
-                this.log(`Share submission error: ${error.message || JSON.stringify(error)}`);
-                return;
-            }
-            if (result === true) {
-                console.log(`[SUCCESS] Share accepted by pool! Nonce: 0x${nonce.toString(16)}`);
-                this.log(`✓ Share accepted! Nonce: 0x${nonce.toString(16)}`);
-            } else {
-                console.error(`[REJECTED] Share rejected by pool:`, result);
-                this.log(`✗ Share rejected: ${result}`);
-            }
-        });
+        const doSubmit = () => {
+            this.sendRequest('mining.submit', params, (error, result) => {
+                let accepted = false;
+                let reason = null;
+                if (error) {
+                    console.error(`[ERROR] Share submission error from pool:`, error);
+                    this.log(`Share submission error: ${error.message || JSON.stringify(error)}`);
+                    this.rejectedShares++;
+                    reason = error.message || JSON.stringify(error);
+                } else if (result === true) {
+                    this.acceptedShares++;
+                    accepted = true;
+                    console.log(`[SUCCESS] Share accepted by pool! Nonce: 0x${nonce.toString(16)}`);
+                    this.log(`✓ Share accepted! Nonce: 0x${nonce.toString(16)}`);
+                } else {
+                    this.rejectedShares++;
+                    reason = JSON.stringify(result);
+                    console.error(`[REJECTED] Share rejected by pool:`, result);
+                    this.log(`✗ Share rejected: ${result}`);
+                }
+
+                console.log(`[STATS] Shares accepted: ${this.acceptedShares} / rejected: ${this.rejectedShares}`);
+
+                // Notify caller (WebSocket server) about result so UI updates
+                try {
+                    if (typeof resultCallback === 'function') {
+                        resultCallback({ accepted, reason });
+                    }
+                } catch (cbErr) {
+                    console.error('[ERROR] resultCallback threw:', cbErr);
+                }
+            });
+        };
+
+        // If submitUser is different from the base authorized user, try authorizing it first
+        // Some pools require mining.authorize per worker; avoid repeating by tracking authorizedWorkers
+        if (submitUser && submitUser !== config.poolUser && !this.authorizedWorkers.has(submitUser)) {
+            if (config.debug) this.log(`Authorizing worker before submit: ${submitUser}`);
+            this.sendRequest('mining.authorize', [submitUser, config.poolPass], (err, res) => {
+                if (err) {
+                    console.error(`[WARN] Per-worker authorize failed for ${submitUser}:`, err.message || err);
+                    // Proceed to submit anyway; pool may accept mining.submit without explicit authorize
+                    doSubmit();
+                    return;
+                }
+                if (res === true) {
+                    this.authorizedWorkers.add(submitUser);
+                    if (config.debug) this.log(`Per-worker authorize succeeded for ${submitUser}`);
+                } else {
+                    if (config.debug) this.log(`Per-worker authorize returned non-true for ${submitUser}: ${JSON.stringify(res)}`);
+                }
+                doSubmit();
+            });
+        } else {
+            doSubmit();
+        }
 
         console.log(`[DEBUG] submitShare returned - share submission initiated`);
 
@@ -934,9 +983,9 @@ class WebSocketServer {
         const clientAddr = `${req.socket.remoteAddress}:${req.socket.remotePort}`;
         const clientId = this.nextClientId++;
         
-        // Store client with its ID
-        this.clients.set(ws, { id: clientId, addr: clientAddr });
-        console.log(`Web miner connected: ${clientAddr} (client #${clientId}, total: ${this.clients.size})`);
+        // Store client with its numeric id and a persistent clientId string (defaults to c<id>)
+        this.clients.set(ws, { id: clientId, addr: clientAddr, clientId: `c${clientId}` });
+        console.log(`Web miner connected: ${clientAddr} (client ${`c${clientId}`}, total: ${this.clients.size})`);
 
         // Send current work with unique nonce range for this client
         if (this.currentWork) {
@@ -952,7 +1001,7 @@ class WebSocketServer {
 
         ws.on('close', () => {
             const clientInfo = this.clients.get(ws);
-            console.log(`Web miner disconnected: ${clientAddr} (client #${clientInfo?.id}, remaining: ${this.clients.size - 1})`);
+            console.log(`Web miner disconnected: ${clientAddr} (client ${clientInfo?.clientId || clientInfo?.id}, remaining: ${this.clients.size - 1})`);
             this.clients.delete(ws);
             // Reassign nonce ranges when a client leaves
             this.redistributeWork();
@@ -972,7 +1021,8 @@ class WebSocketServer {
         const rangeSize = Math.floor(totalNonceSpace / clientCount);
         
         // Assign sequential ranges: client 0 gets [0, rangeSize), client 1 gets [rangeSize, 2*rangeSize), etc.
-        const clientIndex = Array.from(this.clients.values()).findIndex(c => c.id === clientId);
+        const clientArray = Array.from(this.clients.values());
+        const clientIndex = clientArray.findIndex(c => c.id === clientId);
         const startNonce = clientIndex * rangeSize;
         const maxNonce = (clientIndex === clientCount - 1) ? totalNonceSpace : startNonce + rangeSize - 1;
         
@@ -982,7 +1032,9 @@ class WebSocketServer {
             max_nonce: maxNonce
         };
         
-        console.log(`[NONCE] Client #${clientId} assigned range: 0x${startNonce.toString(16)} - 0x${maxNonce.toString(16)} (${((maxNonce - startNonce) / totalNonceSpace * 100).toFixed(1)}% of space)`);
+        const clientInfo = clientArray[clientIndex];
+        const clientLabel = clientInfo && clientInfo.clientId ? clientInfo.clientId : `#${clientId}`;
+        console.log(`[NONCE] Client ${clientLabel} assigned range: 0x${startNonce.toString(16)} - 0x${maxNonce.toString(16)} (${((maxNonce - startNonce) / totalNonceSpace * 100).toFixed(1)}% of space)`);
         
         ws.send(JSON.stringify({
             type: 'work',
@@ -1021,6 +1073,17 @@ class WebSocketServer {
             }
             
             switch (data.type) {
+                case 'identify':
+                    // Allow client to set a persistent `clientId` (string) to be used as worker suffix
+                    if (data.clientId && typeof data.clientId === 'string') {
+                        const info = this.clients.get(ws) || {};
+                        info.clientId = data.clientId.replace(/\s+/g, '_');
+                        this.clients.set(ws, info);
+                        console.log(`[INFO] Client identified as ${info.clientId}`);
+                        // Re-assign work so logs and worker suffix use new id
+                        this.sendWork(ws, this.currentWork);
+                    }
+                    break;
                 case 'share':
                     console.log(`[DEBUG] ========== PROCESSING SHARE MESSAGE ==========`);
                     console.log(`[DEBUG] Share message has work: ${!!data.work}`);
@@ -1189,8 +1252,32 @@ class WebSocketServer {
         console.log(`[DEBUG]   extra.length: ${extra.length} bytes`);
         
         // Submit to pool (use work.extra, not work.solution!)
-        const submitResult = stratumClient.submitShare(data.work, data.nonce, extra);
-        
+        // Derive a per-client suffix: prefer miner-provided `worker`/`workerId`/`deviceId`,
+        // otherwise use server-assigned client id.
+        const clientInfo = this.clients.get(ws) || {};
+        let deviceSuffix = null;
+        if (data.worker && typeof data.worker === 'string') deviceSuffix = data.worker;
+        else if (data.workerId) deviceSuffix = data.workerId;
+        else if (data.deviceId) deviceSuffix = data.deviceId;
+        else if (clientInfo.clientId) deviceSuffix = clientInfo.clientId;
+        else if (clientInfo.id !== undefined) deviceSuffix = `c${clientInfo.id}`;
+        if (typeof deviceSuffix === 'string') deviceSuffix = deviceSuffix.replace(/\s+/g, '_');
+
+        console.log(`[DEBUG] Submitting share on behalf of worker suffix: ${deviceSuffix || '(none)'} (pool user base: ${config.poolUser})`);
+
+        const submitResult = stratumClient.submitShare(data.work, data.nonce, extra, deviceSuffix, (res) => {
+            // Send share_result back to originating client so UI updates counters
+            try {
+                ws.send(JSON.stringify({
+                    type: 'share_result',
+                    accepted: !!res.accepted,
+                    reason: res.reason || null
+                }));
+            } catch (e) {
+                console.error('[ERROR] Failed to send share_result to client:', e);
+            }
+        });
+
         if (submitResult) {
             console.log(`[DEBUG] submitShare returned true - share should be submitted to pool`);
         } else {
