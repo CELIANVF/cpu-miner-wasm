@@ -77,9 +77,10 @@ self.onmessage = async function(e) {
                 await initWasm(msg.data.workerId, msg.data.baseUrl);
                 break;
             case 'mine':
+            case 'work':
                 // New work received - update work (stop old work if mining, start new work)
                 // This is called when clean=false (normal update) or clean=true (after interrupt)
-                const newWork = msg.data.work;
+                const newWork = msg.data ? msg.data.work : msg.work;
                 if (!newWork) {
                     self.postMessage({ 
                         type: 'error',
@@ -365,10 +366,29 @@ function runMiningLoop(work) {
             
             // Always submit found shares - use work.job_id (the job this share was found for)
             // The server will validate if the job is stale or still valid
+            // Determine a reliable nonce to send: prefer result.nonce, otherwise use work.data[30]
+            let sentNonce = (typeof result.nonce === 'number' && (result.nonce >>> 0) !== 0) ? (result.nonce >>> 0) : null;
+            try {
+                const workData30 = result.work && Array.isArray(result.work.data) ? (result.work.data[30] >>> 0) : null;
+                if (!sentNonce && workData30) sentNonce = workData30;
+            } catch (e) {
+                // ignore
+            }
+
+            // Debug: print both result.nonce and work.data[30] (scanhash may write nonce there)
+            try {
+                const resNonce = (typeof result.nonce === 'number') ? (result.nonce >>> 0) : result.nonce;
+                const workData30 = (result.work && Array.isArray(result.work.data)) ? (result.work.data[30] >>> 0) : null;
+                console.log(`[Worker] Debug found nonce values: result.nonce=${resNonce}, work.data[30]=${workData30}`);
+            } catch (e) {
+                console.warn('[Worker] Failed to log debug nonce values', e);
+            }
             console.log(`[Worker] Share found for job ${workJobId}, submitting...`);
             self.postMessage({ 
                 type: 'found', 
-                nonce: result.nonce,
+                // result.nonce may be 0 in some builds; send a best-effort nonce and include work_nonce for diagnostics
+                nonce: sentNonce !== null ? sentNonce : (result.nonce >>> 0),
+                work_nonce: (result.work && Array.isArray(result.work.data)) ? (result.work.data[30] >>> 0) : null,
                 extra: result.extra,
                 job_id: workJobId,  // Use captured workJobId, not currentJobId
                 hashes_done: result.hashes_done,

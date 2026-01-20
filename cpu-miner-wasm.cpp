@@ -17,6 +17,11 @@
 #include "../cpu-miner-verus/verus/verusscan_simple.h"
 #include "miner_wasm.h"
 
+// Global variables required by verusscan_simple.cpp and other Verus sources
+int opt_debug = 0;
+int opt_quiet = 0;
+int verbose = 0;
+
 struct work_restart *work_restart = NULL;
 
 extern "C" EMSCRIPTEN_KEEPALIVE
@@ -58,6 +63,8 @@ static void wasm_to_work(const struct wasm_work *wasm_work, struct work *work) {
     memcpy(work->target, wasm_work->target, sizeof(wasm_work->target));
     memcpy(work->solution, wasm_work->solution, sizeof(wasm_work->solution));
     memcpy(work->extra, wasm_work->extra, sizeof(wasm_work->extra));
+    // Ensure the start_nonce is correctly placed in the data array
+    // In Verus/Equihash, the nonce is typically at index 30 of the uint32 array
     work->data[30] = wasm_work->start_nonce; 
     work->targetdiff = wasm_work->targetdiff;
     strncpy(work->job_id, wasm_work->job_id, sizeof(work->job_id) - 1);
@@ -113,6 +120,13 @@ int mine_work(struct wasm_work *input, struct wasm_result *output) {
         // followed by 1344 bytes of solution data = 1347 bytes total.
         // verusscan writes exactly 1347 bytes to work->extra (see verusscan_simple.cpp line 288).
         // The input->extra buffer is 1388 bytes, so we have enough space.
+        /* Ensure the JS-visible input struct reflects the updated scanner state.
+         * scanhash_verus updates g_work.data[30] and g_work.nonces[], but the
+         * input buffer provided by JS is a separate copy. Copy the updated
+         * nonce back into the input so the worker can read work.data[30]
+         * and use it as a reliable fallback when output->nonce is not set.
+         */
+        input->data[30] = g_work.data[30];
         memcpy(input->extra, g_work.extra, 1347);
     }
 

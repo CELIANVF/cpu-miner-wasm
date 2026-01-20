@@ -394,36 +394,21 @@ class StratumClient {
             return null;
         }
 
-        // For Equihash/Verus: target = 0xffff0000 / difficulty
-        // Reference: equi-stratum.cpp line 50: m = (uint64_t)(4294901760.0 / diff);
-        // 4294901760 = 0xFFFF0000
-        // Use floating division to support fractional difficulties correctly.
-        const MAX_TARGET_NUM = 4294901760; // 0xffff0000
-        const diffNum = Number(difficulty);
-        if (!isFinite(diffNum) || diffNum <= 0) return null;
-
-        // Compute raw target value (may exceed 32-bit for diff < 1); cap to 32-bit range
-        let raw = Math.floor(MAX_TARGET_NUM / diffNum);
-        if (raw <= 0) raw = 1;
-        if (raw > 0xFFFFFFFF) raw = 0xFFFFFFFF;
-
-        // Build 256-bit target buffer and write the 32-bit value at bytes 24-27 (big-endian)
-        const targetBuf = Buffer.alloc(32, 0);
-        targetBuf.writeUInt32BE(raw >>> 0, 24);
-
-        // Reverse entire buffer to match Verus format (same convention used elsewhere)
-        const reversedBuf = Buffer.alloc(32);
-        for (let i = 0; i < 32; i++) {
-            reversedBuf[31 - i] = targetBuf[i];
-        }
-
-        if (config.debug) {
-            const targetHex = reversedBuf.toString('hex');
-            this.log(`Calculated target from diff ${difficulty}: ${targetHex}`);
-            this.log(`  Target value: 0x${raw.toString(16)} (${raw})`);
-        }
-
-        return reversedBuf;
+        const target = Buffer.alloc(32).fill(0);
+        
+        // "Diff 1" cible standard (utilisée par la plupart des pools Verus)
+        // 0x00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+        const diff1 = Buffer.from("00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff", 'hex');
+        
+        // Calcul simplifié pour le Web :
+        // On définit une cible où plus la difficulté est haute, plus le nombre est petit.
+        let quotient = Math.floor(0xffff / difficulty);
+        
+        // On écrit la difficulté à la fin du buffer (poids fort pour l'algo)
+        // Le mineur WASM lit target[7] comme la partie la plus significative
+        target.writeUInt32LE(quotient, 28); 
+        
+        return target;
     }
 
     handleSetTarget(params) {
