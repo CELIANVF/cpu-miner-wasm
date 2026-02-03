@@ -624,6 +624,11 @@ class StratumClient {
         
         const workDifficulty = this.calculateDifficultyFromTarget(target);
         
+        // Store xnonce1 and xnonce2 values at time of work creation
+        // These MUST be used when submitting, not the current values
+        const xnonce1Copy = this.xnonce1 ? Buffer.from(this.xnonce1) : Buffer.alloc(4);
+        const xnonce2Copy = this.xnonce2 ? Buffer.from(this.xnonce2) : Buffer.alloc(4);
+        
         const work = {
             data: data,
             target: target,
@@ -633,7 +638,11 @@ class StratumClient {
             max_nonce: 0xFFFFFFFF,
             job_id: jobId,
             targetdiff: workDifficulty,
-            ntime: ntime
+            ntime: ntime,
+            xnonce1: Array.from(xnonce1Copy),  // Store as array for JSON serialization
+            xnonce2: Array.from(xnonce2Copy),  // Store as array for JSON serialization
+            xnonce1Size: this.xnonce1Size,
+            xnonce2Size: this.xnonce2Size
         };
 
         this.log(`Work built: job=${jobId}, target[7]=0x${target[7].toString(16)}, diff≈${workDifficulty.toFixed(6)}`);
@@ -697,37 +706,34 @@ class StratumClient {
         let extraForSolution = Buffer.from(extra);
         
         // Build the pool nonce field - ALWAYS 15 bytes (Verus requirement)
-        // Structure per verusscan.cpp:
-        // uint8_t nonceSpace[15] = {0}; //pool nonce (32bit) + round(32bit) + thrd id (byte) + padding(2bytes) + counting nonce(32bit)
-        //
-        // In verusscan.cpp, the nonce field is populated from block header:
-        //   memcpy(nonceSpace, &pdata[EQNONCE_OFFSET - 3], 7);     // bytes 0-6 from header
-        //   memcpy(nonceSpace + 7, &pdata[EQNONCE_OFFSET + 2], 4); // bytes 7-10 from header
-        //   memcpy(nonceSpace + 11, &local_nonce, 4);              // bytes 11-14 = counting nonce
-        //
-        // EQNONCE_OFFSET = 30 (uint32 index in work.data)
-        // So: bytes 0-6 come from work.data[27] (byte offset 108) through work.data[28]
-        //     bytes 7-10 come from work.data[32] (byte offset 128)
-        //
-        // For pool mining with xnonce1/xnonce2:
-        // Bytes 0-3: xnonce1 (pool nonce)
-        // Bytes 4-7: xnonce2 (round)
-        // Bytes 8-10: thread id (1) + padding (2) = 0 for web miners
-        // Bytes 11-14: counting nonce (the nonce we found)
+        // CRITICAL: Use xnonce1/xnonce2 from the WORK OBJECT, not current values!
+        // The xnonce2 is incremented on each new job, so we must use the value
+        // that was active when this specific job was created.
+        
+        // Get xnonce values from work object (stored at job creation time)
+        const workXnonce1 = work.xnonce1 ? Buffer.from(work.xnonce1) : (this.xnonce1 || Buffer.alloc(4));
+        const workXnonce2 = work.xnonce2 ? Buffer.from(work.xnonce2) : (this.xnonce2 || Buffer.alloc(4));
+        const workXnonce1Size = work.xnonce1Size || this.xnonce1Size || 4;
+        const workXnonce2Size = work.xnonce2Size || this.xnonce2Size || 4;
+        
+        console.log(`[SUBMIT] Using xnonce1/xnonce2 from work object (job ${work.job_id}):`);
+        console.log(`[SUBMIT]   work.xnonce1: ${workXnonce1.toString('hex')}`);
+        console.log(`[SUBMIT]   work.xnonce2: ${workXnonce2.toString('hex')}`);
+        console.log(`[SUBMIT]   current this.xnonce2: ${this.xnonce2 ? this.xnonce2.toString('hex') : '(none)'}`);
         
         const VERUS_NONCE_SIZE = 15;
         const poolNonceField = Buffer.alloc(VERUS_NONCE_SIZE, 0);
         
-        // Bytes 0-3: xnonce1 (pool nonce, max 4 bytes)
-        if (this.xnonce1 && this.xnonce1.length > 0) {
-            const xnonce1Len = Math.min(this.xnonce1.length, 4);
-            this.xnonce1.copy(poolNonceField, 0, 0, xnonce1Len);
+        // Bytes 0-3: xnonce1 (pool nonce, max 4 bytes) - from work object
+        if (workXnonce1 && workXnonce1.length > 0) {
+            const xnonce1Len = Math.min(workXnonce1.length, 4);
+            workXnonce1.copy(poolNonceField, 0, 0, xnonce1Len);
         }
         
-        // Bytes 4-7: xnonce2 (round, max 4 bytes)
-        if (this.xnonce2 && this.xnonce2.length > 0) {
-            const xnonce2Len = Math.min(this.xnonce2.length, 4);
-            this.xnonce2.copy(poolNonceField, 4, 0, xnonce2Len);
+        // Bytes 4-7: xnonce2 (round, max 4 bytes) - from work object
+        if (workXnonce2 && workXnonce2.length > 0) {
+            const xnonce2Len = Math.min(workXnonce2.length, 4);
+            workXnonce2.copy(poolNonceField, 4, 0, xnonce2Len);
         }
         
         // Bytes 8-10: thread id (1 byte) + padding (2 bytes) = 0 for web miners
@@ -800,30 +806,58 @@ class StratumClient {
             submitUser = base ? `${base}.${worker}` : worker;
         }
         
-        // Build nonce2 hex string - this is what the miner fills in
-        // For Equihash/Verus stratum, nonce2 is EXACTLY xnonce2Size bytes
-        // The counting nonce is embedded in the solution, NOT in nonce2
-        // nonce2 = just the extranonce2 value the miner uses
-        const nonce2Buf = Buffer.alloc(this.xnonce2Size, 0);
+        // Build noncestr - this is the nonce field WITHOUT the xnonce1 prefix
+        // Per ccminer equi-stratum.cpp:
+        //   nonce_len = 32 - stratum.xnonce1_size
+        //   noncestr = bin2hex(&nonce[stratum.xnonce1_size], nonce_len)
+        // So for xnonce1_size=4, we need 28 bytes of nonce data
+        // CRITICAL: Use xnonce values from work object, not current values!
+        const nonceLen = 32 - workXnonce1Size;
+        const nonceBuf = Buffer.alloc(nonceLen, 0);
         
-        // Copy xnonce2 value (this was incremented when job was received)
-        if (this.xnonce2 && this.xnonce2.length > 0) {
-            this.xnonce2.copy(nonce2Buf, 0, 0, Math.min(this.xnonce2.length, this.xnonce2Size));
+        // The nonce field in Verus block header is at work.data[27] (byte offset 108)
+        // Structure: xnonce1 (at start) + xnonce2 + thread_id + padding + counting_nonce
+        // We need to submit everything AFTER xnonce1
+        
+        let offset = 0;
+        
+        // xnonce2 (typically 4 bytes) - USE FROM WORK OBJECT
+        if (workXnonce2 && workXnonce2.length > 0) {
+            const xn2Len = Math.min(workXnonce2.length, workXnonce2Size);
+            workXnonce2.copy(nonceBuf, offset, 0, xn2Len);
+            offset += workXnonce2Size;  // Use declared size, not actual
+        } else {
+            offset += workXnonce2Size;
         }
         
-        const nonce2Hex = nonce2Buf.toString('hex');
+        // Thread id (1 byte) + padding (2 bytes) - typically 0 for web miners
+        nonceBuf[offset] = 0;      // thread id
+        nonceBuf[offset + 1] = 0;  // padding 1
+        nonceBuf[offset + 2] = 0;  // padding 2
+        offset += 3;
         
-        console.log(`[NONCE2] Building nonce2 for submission:`);
-        console.log(`[NONCE2]   xnonce2Size from pool: ${this.xnonce2Size}`);
-        console.log(`[NONCE2]   nonce2 value: ${nonce2Hex} (${this.xnonce2Size} bytes)`);
-        console.log(`[NONCE2]   counting nonce (in solution): 0x${nonce.toString(16).padStart(8, '0')}`);
+        // Counting nonce (4 bytes, little-endian)
+        nonceBuf.writeUInt32LE(nonce >>> 0, offset);
+        offset += 4;
         
-        // Verus/Equihash mining.submit format: [worker, job_id, ntime, nonce2, solution]
+        // Remaining bytes (if any) stay as 0
+        
+        const nonceHex = nonceBuf.toString('hex');
+        
+        console.log(`[NONCE] Building nonce for submission (Verus format):`);
+        console.log(`[NONCE]   xnonce1Size: ${workXnonce1Size}, nonceLen: ${nonceLen} bytes`);
+        console.log(`[NONCE]   xnonce2 (bytes 0-${workXnonce2Size-1}): ${nonceBuf.slice(0, workXnonce2Size).toString('hex')}`);
+        console.log(`[NONCE]   thread+pad (bytes ${workXnonce2Size}-${workXnonce2Size+2}): ${nonceBuf.slice(workXnonce2Size, workXnonce2Size+3).toString('hex')}`);
+        console.log(`[NONCE]   counting nonce (bytes ${workXnonce2Size+3}-${workXnonce2Size+6}): ${nonceBuf.slice(workXnonce2Size+3, workXnonce2Size+7).toString('hex')}`);
+        console.log(`[NONCE]   full nonceHex (${nonceLen} bytes): ${nonceHex}`);
+        
+        // Verus/Equihash mining.submit format: [worker, job_id, ntime, noncestr, solution]
+        // Per equi-stratum.cpp: noncestr = full nonce minus xnonce1 prefix
         const params = [
             submitUser,
             work.job_id,
             ntimeHex,
-            nonce2Hex,
+            nonceHex,
             solutionHex
         ];
         

@@ -337,16 +337,25 @@ class WebSocketServer {
         
         console.log(`[DEBUG] Clean job received: ${newJobId} (soft clean for web miners)`);
         
-        // For web miners: keep a soft window instead of hard-invalidating
-        // Remove jobs that are older than the clean job, but preserve a sliding window
+        // For web miners: DON'T aggressively clear jobs on clean
+        // Web miners are slow and need a longer validity window
+        // Only remove jobs that are older than jobValidityWindow (30s by default)
+        const cutoffTime = now - this.jobValidityWindow;
+        let removed = 0;
         for (const [jobId, ts] of this.recentJobs.entries()) {
-            if (!this.isJobIdAfter(jobId, newJobId)) {
+            if (ts < cutoffTime) {
                 this.recentJobs.delete(jobId);
+                removed++;
             }
+        }
+        if (removed > 0) {
+            console.log(`[DEBUG] Removed ${removed} jobs older than ${this.jobValidityWindow}ms from window`);
         }
         
         // Ensure the new clean job is in the window
         this.recentJobs.set(newJobId, now);
+        
+        console.log(`[DEBUG] Recent jobs window now has ${this.recentJobs.size} jobs: [${Array.from(this.recentJobs.keys()).slice(-10).join(', ')}]`);
         
         const message = JSON.stringify({
             type: 'interrupt',
