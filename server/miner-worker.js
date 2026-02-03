@@ -129,21 +129,33 @@ async function mineWork(work) {
         }
         offset += 48 * 4;
         
-        // target[8] - uint32 array
-        for (let i = 0; i < 8; i++) {
-            HEAPU32[(workPtr >> 2) + 48 + i] = work.target[i] || 0;
+        // target[8] - uint32 array (OPTIMIZED: use native set() instead of loop)
+        if (work.target instanceof Uint32Array) {
+            HEAPU32.set(work.target, (workPtr >> 2) + 48);
+        } else {
+            for (let i = 0; i < 8; i++) {
+                HEAPU32[(workPtr >> 2) + 48 + i] = work.target[i] || 0;
+            }
         }
         offset += 8 * 4;
         
-        // solution[1344] - uint8 array
-        for (let i = 0; i < 1344; i++) {
-            HEAPU8[workPtr + offset + i] = work.solution[i] || 0;
+        // solution[1344] - uint8 array (OPTIMIZED: use native set() instead of loop)
+        if (work.solution instanceof Uint8Array) {
+            HEAPU8.set(work.solution, workPtr + offset);
+        } else {
+            for (let i = 0; i < 1344; i++) {
+                HEAPU8[workPtr + offset + i] = work.solution[i] || 0;
+            }
         }
         offset += 1344;
         
-        // extra[1388] - uint8 array
-        for (let i = 0; i < 1388; i++) {
-            HEAPU8[workPtr + offset + i] = work.extra[i] || 0;
+        // extra[1388] - uint8 array (OPTIMIZED: use native set() instead of loop)
+        if (work.extra instanceof Uint8Array) {
+            HEAPU8.set(work.extra, workPtr + offset);
+        } else {
+            for (let i = 0; i < 1388; i++) {
+                HEAPU8[workPtr + offset + i] = work.extra[i] || 0;
+            }
         }
         offset += 1388;
         
@@ -168,7 +180,7 @@ async function mineWork(work) {
         
         // Mine in a loop with progress updates
         let currentNonce = work.start_nonce || 0;
-        const chunkSize = 100000; // 100k nonces per iteration
+        const chunkSize = 2000000; // 2M nonces per iteration (fast processing to avoid stale jobs)
         
         let sampleHashCount = 0;
         while (mining && currentNonce < work.max_nonce) {

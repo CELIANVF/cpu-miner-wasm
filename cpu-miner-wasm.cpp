@@ -92,7 +92,9 @@ int mine_work(struct wasm_work *input, struct wasm_result *output) {
     int found = 0;
 
     // We mine in chunks to keep the browser UI responsive
-    const uint32_t chunk_size = 50000; 
+    // OPTIMIZED FOR SPEED: Increased to 500000 to find shares faster
+    // and avoid stale job rejections (pool timeout ~20s)
+    const uint32_t chunk_size = 100000; 
     
     while (current_nonce < max_nonce && !g_work_restart_single.restart) {
         // Calculate chunk end, ensuring we don't exceed max_nonce

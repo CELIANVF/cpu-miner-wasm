@@ -18,9 +18,11 @@ class WebSocketServer {
         this.shareCallback = null;
         
         // Sliding window of recent valid jobs (jobId -> timestamp)
-        // Keeps jobs for 30 seconds to handle WASM latency + GC + tab throttling
+        // Extended to 300 seconds (5 minutes) for web miners
+        // Web miners are slower and need more time to complete mining chunks
+        // Pool typically accepts shares for ~10-20 seconds, we keep longer history to minimize stale rejects
         this.recentJobs = new Map();
-        this.jobValidityWindow = 30000; // 30 seconds in milliseconds
+        this.jobValidityWindow = 300000; // 300 seconds (5 minutes) in milliseconds
         
         // Cleanup old jobs every 5 seconds
         this.cleanupInterval = setInterval(() => {
@@ -339,7 +341,7 @@ class WebSocketServer {
         
         // For web miners: DON'T aggressively clear jobs on clean
         // Web miners are slow and need a longer validity window
-        // Only remove jobs that are older than jobValidityWindow (30s by default)
+        // Only remove jobs that are older than jobValidityWindow (20s to match pool)
         const cutoffTime = now - this.jobValidityWindow;
         let removed = 0;
         for (const [jobId, ts] of this.recentJobs.entries()) {
