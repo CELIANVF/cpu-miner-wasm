@@ -6,6 +6,7 @@ let workerId = -1;
 let currentWork = null;
 let mining = false;
 let baseUrl = '';
+let currentMiningPromise = null; // Track current mining operation
 
 // Message handler
 self.onmessage = async function(e) {
@@ -32,10 +33,29 @@ self.onmessage = async function(e) {
                 return;
             }
             try {
+                // Stop any current mining operation
+                if (currentMiningPromise) {
+                    console.log(`[Worker ${workerId}] Stopping previous mining operation for new job`);
+                    mining = false;
+                    // Wait for previous operation to complete and cleanup
+                    await currentMiningPromise;
+                }
+                
                 currentWork = msg.data.work;
                 mining = true;
-                await mineWork(currentWork);
+                console.log(`[Worker ${workerId}] Starting mining for job ${currentWork.job_id}`);
+                
+                // Reset WASM miner state for clean job transition
+                if (Module && Module._reset_miner) {
+                    Module._reset_miner();
+                    console.log(`[Worker ${workerId}] WASM miner state reset for new job`);
+                }
+                
+                currentMiningPromise = mineWork(currentWork);
+                await currentMiningPromise;
+                currentMiningPromise = null;
             } catch (err) {
+                currentMiningPromise = null;
                 self.postMessage({ 
                     type: 'error', 
                     error: `Mining error: ${err.message || err}`
@@ -45,6 +65,7 @@ self.onmessage = async function(e) {
             
         case 'stop':
             mining = false;
+            currentMiningPromise = null;
             if (Module && Module._request_restart) {
                 Module._request_restart();
             }
@@ -98,6 +119,14 @@ async function initWasm() {
 
 async function mineWork(work) {
     if (!work || !Module) return;
+    
+    console.log(`[Worker ${workerId}] Starting mineWork for job ${work.job_id}`);
+    
+    // Check if mining was cancelled before we even start
+    if (!mining) {
+        console.log(`[Worker ${workerId}] Mining cancelled before start for job ${work.job_id}`);
+        return;
+    }
     
     // Get memory views from Module
     const HEAP8 = Module.HEAP8;
@@ -184,6 +213,11 @@ async function mineWork(work) {
         
         let sampleHashCount = 0;
         while (mining && currentNonce < work.max_nonce) {
+            // Check if mining was cancelled (new job arrived)
+            if (!mining) {
+                console.log(`[Worker ${workerId}] Mining cancelled mid-operation for job ${work.job_id}`);
+                break;
+            }
             // Update start_nonce for this chunk
             const startNonceOffset = 4*48 + 4*8 + 1344 + 1388;
             HEAPU32[(workPtr + startNonceOffset) >> 2] = currentNonce;
@@ -294,6 +328,7 @@ async function mineWork(work) {
         // Free allocated memory
         Module._free(workPtr);
         Module._free(resultPtr);
+        console.log(`[Worker ${workerId}] Completed mineWork for job ${work.job_id} - memory freed`);
     }
 }
 
