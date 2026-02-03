@@ -891,65 +891,19 @@ class StratumClient {
         }
 
         // 1. Prepare the Nonce
-        // According to ccminer equi-stratum.cpp line 284-286:
-        //   unsigned char * nonce = (unsigned char*) (&work->data[27]);
-        //   size_t nonce_len = 32 - stratum.xnonce1_size;
-        //   noncestr = bin2hex(&nonce[stratum.xnonce1_size], nonce_len);
-        // 
-        // So the submitted nonce is:
-        //   - Start at work.data[27] + xnonce1_size (skip the xnonce1 bytes)
-        //   - Length is (32 - xnonce1_size) bytes
-        //   - This includes xnonce2 + additional nonce + found nonce
+        // For Verus Stratum mining.submit via JSON RPC, the nonce should be just the 4-byte found nonce
+        // in little-endian hex format (8 hex characters)
+        // The pool uses this to validate the share against the difficulty target
         
         let nonceHex = null;
-        if (this.xnonce1 && this.xnonce2 && extraForSolution) {
-            // Build nonce the same way ccminer does:
-            // nonce buffer starts at work->data[27] which is 32 bytes of xnonce + nonce data
-            const nonceBuf = Buffer.alloc(32);
-            let offset = 0;
-            
-            // Copy xnonce1
-            if (this.xnonce1.length > 0) {
-                this.xnonce1.copy(nonceBuf, offset);
-                offset += this.xnonce1.length;
-            }
-            
-            // Copy xnonce2 (4 bytes)
-            if (this.xnonce2.length > 0) {
-                this.xnonce2.copy(nonceBuf, offset);
-                offset += this.xnonce2.length;
-            }
-            
-            // Skip 4 bytes of additional nonce (usually zeros, part of the extended nonce space)
-            offset += 4;  // Now offset = xnonce1_size + 4 + 4 = 8 + 4 = 12 if xnonce1_size=4
-            
-            // Copy found nonce (4 bytes LE)
-            // This goes at position [xnonce1_size + 8], which matches Verus Stratum pool nonce structure
-            const nonceLEBuf = Buffer.alloc(4);
-            nonceLEBuf.writeUInt32LE(nonce >>> 0, 0);
-            nonceLEBuf.copy(nonceBuf, offset);
-            
-            // Now extract the submission nonce:
-            // Start at position xnonce1_size, length is (32 - xnonce1_size)
-            const xnonce1_size = this.xnonce1.length;
-            const nonce_len = 32 - xnonce1_size;
-            const submissionNonceBuf = nonceBuf.slice(xnonce1_size, xnonce1_size + nonce_len);
-            nonceHex = submissionNonceBuf.toString('hex');
-            
-            console.log(`[NONCE-CCMINER] Built nonce like ccminer:`);
-            console.log(`[NONCE-CCMINER]   xnonce1: ${this.xnonce1.toString('hex')} (${xnonce1_size} bytes)`);
-            console.log(`[NONCE-CCMINER]   xnonce2: ${this.xnonce2.toString('hex')}`);
-            console.log(`[NONCE-CCMINER]   found nonce: 0x${nonce.toString(16).padStart(8, '0')}`);
-            console.log(`[NONCE-CCMINER]   full nonce buffer (32 bytes): ${nonceBuf.toString('hex')}`);
-            console.log(`[NONCE-CCMINER]   submission nonce (from offset ${xnonce1_size}, length ${nonce_len}): ${nonceHex}`);
-            console.log(`[NONCE-CCMINER]   submission nonce length: ${nonceHex.length} chars = ${nonceHex.length / 2} bytes`);
-        } else {
-            // Fallback
-            console.error(`[ERROR] Cannot build nonce - missing xnonce1 or xnonce2 or extra`);
-            const nonceBuf = Buffer.alloc(4);
-            nonceBuf.writeUInt32LE(nonce >>> 0, 0);
-            nonceHex = nonceBuf.toString('hex');
-        }
+        const nonceBuf = Buffer.alloc(4);
+        nonceBuf.writeUInt32LE(nonce >>> 0, 0);
+        nonceHex = nonceBuf.toString('hex');
+        
+        console.log(`[NONCE] Built nonce submission (4-byte found nonce):`);
+        console.log(`[NONCE]   found nonce value: 0x${nonce.toString(16).padStart(8, '0')}`);
+        console.log(`[NONCE]   found nonce (LE hex): ${nonceHex}`);
+        console.log(`[NONCE]   submission nonce length: ${nonceHex.length} chars = ${nonceHex.length / 2} bytes`);
 
         // 3. Prepare ntime - Use pool's ntime from work.data[25] (like ccminer and cpu-miner-verus do)
         // Reference: ccminer equi_stratum_submit line 301: sprintf(timehex, "%08x", swab32(work->data[25]));
@@ -1026,7 +980,7 @@ class StratumClient {
             submitUser,                 // worker: base wallet + optional device suffix
             work.job_id,                // job_id from mining.notify
             ntimeHex,                   // ntime (byte-swapped from work.data[25])
-            nonceHex,                   // nonce (currently 4-byte format)
+            nonceHex,                   // nonce (4-byte found nonce in LE hex)
             solutionHex                 // solution hex
         ];
 
@@ -1039,18 +993,16 @@ class StratumClient {
         console.log(`[MINING.SUBMIT]   [0] worker: "${params[0]}"`);
         console.log(`[MINING.SUBMIT]   [1] job_id: "${params[1]}"`);
         console.log(`[MINING.SUBMIT]   [2] ntime: "${params[2]}" (${params[2].length} hex chars = ${params[2].length / 2} bytes)`);
-        console.log(`[MINING.SUBMIT]   [3] nonce: "${params[3]}" (${params[3].length} hex chars = ${params[3].length / 2} bytes) <<< THIS IS THE PROBLEM`);
+        console.log(`[MINING.SUBMIT]   [3] nonce: "${params[3]}" (${params[3].length} hex chars = ${params[3].length / 2} bytes) - Should be 8 hex chars (4 bytes)`);
         console.log(`[MINING.SUBMIT]   [4] solution: "${params[4].substring(0, 50)}..." (${params[4].length} hex chars = ${params[4].length / 2} bytes)`);
         console.log(`[MINING.SUBMIT]   Raw nonce parameter: ${JSON.stringify(params[3])}`);
         
         // Validate nonce length
         console.log(`[NONCE-CHECK] Nonce length: ${params[3].length} chars`);
         if (params[3].length === 8) {
-            console.log(`[NONCE-CHECK]   ✓ 4-byte format (8 hex chars)`);
-        } else if (params[3].length === 30) {
-            console.log(`[NONCE-CHECK]   ✓ 15-byte format (30 hex chars)`);
+            console.log(`[NONCE-CHECK]   ✓ 4-byte format (8 hex chars) - CORRECT (found nonce in LE hex)`);
         } else {
-            console.error(`[NONCE-CHECK]   ✗ UNEXPECTED LENGTH: ${params[3].length} chars!`);
+            console.error(`[NONCE-CHECK]   ✗ ERROR: Unexpected nonce length: ${params[3].length} chars! (Expected 8 for 4-byte nonce)`);
         }
         
         // Log what we're about to send
@@ -1137,6 +1089,16 @@ class WebSocketServer {
         this.previousJobId = null;  // Track previous job to allow shares for it
         this.lastCleanJobId = null; // Track last clean job - jobs before this are invalid
         this.submittedShares = new Set(); // Track submitted shares for deduplication
+        
+        // Sliding window of recent valid jobs (jobId -> timestamp)
+        // Keeps jobs for 15 seconds to handle WASM latency
+        this.recentJobs = new Map();
+        this.jobValidityWindow = 15000; // 15 seconds in milliseconds
+        
+        // Cleanup old jobs every 5 seconds
+        this.cleanupInterval = setInterval(() => {
+            this.cleanupOldJobs();
+        }, 5000);
         
         this.wss.on('connection', (ws, req) => {
             this.handleConnection(ws, req);
@@ -1309,62 +1271,39 @@ class WebSocketServer {
             return;
         }
         
-        // Share validation logic:
-        // When clean=false: Only job ID is updated, miners continue mining, shares for previous job are still valid
-        // When clean=true: Miners are stopped and restarted, all jobs BEFORE the clean job are invalidated
-        // 
-        // Strategy:
-        // 1. Always accept shares for current job
-        // 2. Accept shares for previous job IF they came after (or equal to) the last clean job
-        // 3. Reject all other shares (too old or invalidated by clean job)
+        // Share validation logic (matches real Verus pools):
+        // Accept shares for EITHER current job OR any job in the sliding window.
+        // This handles WASM latency and rapid job changes without being too lenient.
         
         const isCurrentJob = shareJobId === this.currentWork.job_id;
-        const isPreviousJob = this.previousJobId && shareJobId === this.previousJobId;
+        const isRecentJob = this.recentJobs.has(shareJobId);
+        const jobAge = isRecentJob ? (Date.now() - this.recentJobs.get(shareJobId)) : null;
         
-        console.log(`[DEBUG] Share validation: shareJobId=${shareJobId}, currentJob=${this.currentWork.job_id}, previousJob=${this.previousJobId || 'none'}, lastCleanJob=${this.lastCleanJobId || 'none'}`);
-        console.log(`[DEBUG]   isCurrentJob=${isCurrentJob}, isPreviousJob=${isPreviousJob}`);
+        console.log(`[DEBUG] Share validation: shareJobId=${shareJobId}, currentJob=${this.currentWork.job_id}`);
+        console.log(`[DEBUG]   isCurrentJob=${isCurrentJob}, isRecentJob=${isRecentJob}` + (jobAge !== null ? `, age=${jobAge}ms` : ''));
+        console.log(`[DEBUG]   Recent jobs window: [${Array.from(this.recentJobs.keys()).join(', ')}]`);
         
-        // Check if this job came after the last clean job (if a clean job exists)
-        // If a clean job arrived (e.g., 70e34), only jobs >= that clean job are valid
-        // So a share for 70df7 would be rejected because 70df7 < 70e34
-        let isValidAfterClean = true;
-        if (this.lastCleanJobId) {
-            // Parse job IDs as hex numbers for comparison
-            const shareJobNum = parseInt(shareJobId, 16);
-            const cleanJobNum = parseInt(this.lastCleanJobId, 16);
-            isValidAfterClean = !isNaN(shareJobNum) && !isNaN(cleanJobNum) && shareJobNum >= cleanJobNum;
-            console.log(`[DEBUG]   Clean job check: ${shareJobId} (${shareJobNum}) >= ${this.lastCleanJobId} (${cleanJobNum}) = ${isValidAfterClean}`);
-        } else {
-            console.log(`[DEBUG]   No clean job recorded, all recent jobs are valid`);
-        }
-        
-        // Allow shares for:
-        // 1. Current job (always valid)
-        // 2. Any job that came after (or equal to) the last clean job
-        //    This allows shares for previous jobs and even older jobs, as long as they weren't invalidated
-        //    by a clean job. When clean=false, multiple jobs can arrive, and shares for older jobs
-        //    (that came after the last clean job) should still be valid.
-        const isValidShare = isCurrentJob || isValidAfterClean;
-        
-        if (!isValidShare) {
-            let reason = '';
-            if (this.lastCleanJobId) {
-                reason = `Share is for job ${shareJobId}, which came before the last clean job ${this.lastCleanJobId}. All jobs before a clean job are invalidated.`;
-            } else {
-                reason = `Share is for job ${shareJobId}, which is neither the current job (${this.currentWork.job_id}) nor a valid previous job.`;
-            }
+        if (!isCurrentJob && !isRecentJob) {
+            const recentJobsStr = this.recentJobs.size > 0 ? Array.from(this.recentJobs.keys()).join(', ') : 'none';
+            const reason = `Share rejected: Job ${shareJobId} is not in valid window. Current: ${this.currentWork.job_id}, Recent: [${recentJobsStr}]`;
+            console.warn(`[REJECTED-STALE] ${reason}`);
             
-            // TESTING: Submit stale shares anyway to verify hash computation is correct
-            // The pool will likely reject with "job not found" or similar, but if we get
-            // "low difficulty" it means the hash is still wrong, and if we get accepted
-            // or "stale" from pool, the hash is correct.
-            console.warn(`[STALE] Share is stale but submitting anyway for testing: Job ${shareJobId}`);
-            console.warn(`[STALE]   Current: ${this.currentWork.job_id}, Previous: ${this.previousJobId || 'none'}, LastClean: ${this.lastCleanJobId || 'none'}`);
-            console.warn(`[STALE]   Reason: ${reason}`);
-            // Continue to submit instead of returning
+            try {
+                if (typeof resultCallback === 'function') {
+                    resultCallback({ accepted: false, reason: 'Share is for expired job (too old)' });
+                }
+            } catch (e) {
+                // ignore
+            }
+            return;
         }
         
-        console.log(`[DEBUG] Share validation PASSED - share will be submitted to pool`);
+        // Share is valid! Log whether it's current or within the sliding window
+        if (isCurrentJob) {
+            console.log(`[DEBUG] Share validation PASSED - current job share, will submit to pool`);
+        } else {
+            console.log(`[DEBUG] Share validation PASSED - recent job share (age: ${jobAge}ms, acceptable within window), will submit to pool`);
+        }
         
         // DEBUG: Check if share meets target
         if (config.debug && data.work && data.work.target) {
@@ -1390,7 +1329,7 @@ class WebSocketServer {
             }
         }
 
-        console.log(`[DEBUG] Share passed job_id validation (job: ${shareJobId}, current: ${this.currentWork.job_id}, previous: ${this.previousJobId || 'none'}). Proceeding with submission...`);
+        console.log(`[DEBUG] Share passed job_id validation (job: ${shareJobId}, current: ${this.currentWork.job_id}). Proceeding with submission...`);
 
         const shareKey = `${data.work.job_id}:${data.nonce}`;
         
@@ -1507,10 +1446,14 @@ class WebSocketServer {
         // This allows shares for the previous job if it wasn't invalidated by a clean job
         if (this.currentWork && this.currentWork.job_id !== work.job_id) {
             this.previousJobId = this.currentWork.job_id;
+            // Add previous job to sliding window
+            this.recentJobs.set(this.previousJobId, Date.now());
             console.log(`[DEBUG] Previous job tracked: ${this.previousJobId} -> Current: ${work.job_id}`);
         }
         
         this.currentWork = work;
+        // Add current job to sliding window
+        this.recentJobs.set(work.job_id, Date.now());
         
         // Send work to each client with their unique nonce range
         console.log(`[NONCE] Broadcasting new job ${work.job_id} to ${this.clients.size} clients with unique ranges`);
@@ -1550,6 +1493,22 @@ class WebSocketServer {
         } catch (e) {
             // If we can't parse as hex, do string comparison
             return jobId1 >= jobId2;
+        }
+    }
+
+    cleanupOldJobs() {
+        const now = Date.now();
+        let removed = 0;
+        
+        for (const [jobId, timestamp] of this.recentJobs.entries()) {
+            if (now - timestamp > this.jobValidityWindow) {
+                this.recentJobs.delete(jobId);
+                removed++;
+            }
+        }
+        
+        if (removed > 0 && config.debug) {
+            console.log(`[DEBUG] Cleaned up ${removed} old jobs from validity window`);
         }
     }
 }
