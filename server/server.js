@@ -28,11 +28,12 @@ function getArg(name) {
 }
 
 const config = {
-    poolUrl: process.env.POOL_URL || getArg('pool') || 'stratum+tcp://pool.verus.io:9999',
+    poolUrl: process.env.POOL_URL || getArg('pool') || 'stratum+tcp://pool.verus.io:9998',
     poolUser: process.env.POOL_USER || getArg('user') || '',
     poolPass: process.env.POOL_PASS || getArg('pass') || 'x',
     wsPort: parseInt(process.env.WS_PORT || getArg('port') || '8080'),
-    debug: process.argv.includes('--debug') || process.env.DEBUG === '1'
+    debug: process.argv.includes('--debug') || process.env.DEBUG === '1',
+    testMode: process.argv.includes('--test-mode') || process.env.TEST_MODE === '1'
 };
 
 // Parse pool URL
@@ -221,7 +222,11 @@ class StratumClient {
                     if (callback) {
                         this.pendingRequests.delete(message.id);
                         if (message.error) {
-                            callback(new Error(message.error.message || 'Unknown error'), null);
+                            // Error from pool - could be string or object
+                            const errorMsg = typeof message.error === 'string' 
+                                ? message.error 
+                                : (message.error.message || JSON.stringify(message.error));
+                            callback(new Error(errorMsg), null);
                         } else {
                             callback(null, message.result);
                         }
@@ -289,8 +294,11 @@ class StratumClient {
             }
         }
         const nbits = params[6];
-        const clean = params[7] || false;
+        const poolClean = params[7] || false;
         const solution = params[8] || null;
+
+        // Ne considérer clean=true que si le jobId change réellement
+        const clean = poolClean && (!this.currentJob || this.currentJob.jobId !== jobId);
         const merkleBranches = []; // Verus doesn't use merkle branches
 
         this.log(`New job: ${jobId} (clean: ${clean})`);
@@ -355,9 +363,12 @@ class StratumClient {
             if (!this.currentTarget || this.currentTarget.length < 32) {
                 const calculatedTarget = this.difficultyToTarget(newDifficulty);
                 if (calculatedTarget) {
-                    // Store as currentTarget so buildWork uses it
-                    this.currentTarget = calculatedTarget;
-                    this.log(`Target calculated from difficulty ${newDifficulty}: ${Buffer.from(calculatedTarget).toString('hex')}`);
+                    // Convert array to Buffer
+                    this.currentTarget = Buffer.alloc(32);
+                    for (let i = 0; i < 8; i++) {
+                        this.currentTarget.writeUInt32LE(calculatedTarget[i], i * 4);
+                    }
+                    this.log(`Target calculated from difficulty ${newDifficulty}: ${this.currentTarget.toString('hex')}`);
                     
                     // Update and rebroadcast current job with new target if we have one
                     if (this.currentJob && this.lastNotifyParams) {
@@ -388,25 +399,19 @@ class StratumClient {
     }
 
     // Convert difficulty to target for Verus/Equihash
-    // Based on diff_to_target_equi from ccminer-equi/equi-stratum.cpp
     difficultyToTarget(difficulty) {
-        if (!difficulty || difficulty <= 0) {
-            return null;
+        if (difficulty <= 0) return new Array(8).fill(0);
+        
+        // For Verus, difficulty = 1 corresponds to target MSB = 0x00000020
+        // So target MSB = 0x00000020 / difficulty
+        const targetMsb = Math.floor(0x00000020 / difficulty);
+        
+        const target = new Array(8).fill(0);
+        target[7] = targetMsb >>> 0;  // Ensure unsigned 32-bit
+        
+        if (config.debug) {
+            this.log(`Difficulty ${difficulty} -> target MSB: 0x${targetMsb.toString(16).padStart(8, '0')}`);
         }
-
-        const target = Buffer.alloc(32).fill(0);
-        
-        // "Diff 1" cible standard (utilisée par la plupart des pools Verus)
-        // 0x00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-        const diff1 = Buffer.from("00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff", 'hex');
-        
-        // Calcul simplifié pour le Web :
-        // On définit une cible où plus la difficulté est haute, plus le nombre est petit.
-        let quotient = Math.floor(0xffff / difficulty);
-        
-        // On écrit la difficulté à la fin du buffer (poids fort pour l'algo)
-        // Le mineur WASM lit target[7] comme la partie la plus significative
-        target.writeUInt32LE(quotient, 28); 
         
         return target;
     }
@@ -416,25 +421,110 @@ class StratumClient {
             const targetHex = params[0];
             this.currentTarget = Buffer.from(targetHex, 'hex');
             this.isEquihash = true;
-            this.log(`Target set: ${targetHex}`);
+            console.log(`[POOL] Target set (raw): ${targetHex}`);
+            console.log(`[POOL] Target buffer length: ${this.currentTarget.length} bytes`);
+            this.log(`Target set (raw): ${targetHex}`);
             this.log(`Target buffer length: ${this.currentTarget.length} bytes`);
             
-            // Update current job if exists
-            if (this.currentJob && this.currentTarget.length >= 32) {
-                // CRITICAL FIX: Reverse the entire 32-byte buffer first (like CPU miner does)
-                const reversedTarget = Buffer.alloc(32);
+            // CRITICAL: ccminer reverses the entire 32-byte target array!
+            // Pool sends: [0x00, 0x00, 0x04, 0x00, 0x00, ..., 0x00] (big-endian)
+            // ccminer reverses to: [0x00, 0x00, ..., 0x00, 0x00, 0x04, 0x00, 0x00]
+            // This reversed array is then stored as little-endian uint32[8]
+            
+            if (this.currentTarget.length >= 32) {
+                // Reverse the entire 32-byte buffer (like ccminer does)
+                const reversed = Buffer.alloc(32);
                 for (let i = 0; i < 32; i++) {
-                    reversedTarget[31 - i] = this.currentTarget[i];
+                    reversed[i] = this.currentTarget[31 - i];
                 }
                 
-                // Now read as little-endian uint32s
+                // Now read as little-endian uint32 array
+                const targetArray = new Array(8);
                 for (let i = 0; i < 8; i++) {
-                    this.currentJob.work.target[i] = reversedTarget.readUInt32LE(i * 4);
+                    targetArray[i] = reversed.readUInt32LE(i * 4);
                 }
-                this.log(`Target array: ${this.currentJob.work.target.map(x => x.toString(16).padStart(8, '0')).join(' ')}`);
-                wss.broadcastWork(this.currentJob.work);
+                
+                console.log(`[POOL] Target array after reversal and LE reading: [${targetArray.map(x => '0x' + x.toString(16).padStart(8, '0')).join(', ')}]`);
+                console.log(`[POOL] Target[7] (MSB): 0x${targetArray[7].toString(16)}`);
+                
+                const calcDiff = this.calculateDifficultyFromTarget(targetArray);
+                console.log(`[POOL] Calculated difficulty from target: ${calcDiff.toFixed(6)}`);
+                
+                // Update current job's work target if it exists
+                if (this.currentJob && this.currentJob.work) {
+                    this.currentJob.work.target = targetArray;
+                    this.currentJob.work.targetdiff = calcDiff;
+                    
+                    this.log(`Target array updated: [${targetArray.map(x => '0x' + x.toString(16).padStart(8, '0')).join(', ')}]`);
+                    this.log(`Target difficulty: ${calcDiff}`);
+                    
+                    wss.broadcastWork(this.currentJob.work);
+                } else {
+                    this.log(`[INFO] Target set but no current job yet - will apply when next job arrives`);
+                }
             }
         }
+    }
+
+    // Helper: Calculate difficulty from target (32-byte array, little-endian uint32 format)
+    calculateDifficultyFromTarget(targetArray) {
+        // Use the exact ccminer algorithm from equi_stratum_set_target
+        
+        if (!targetArray || targetArray.length < 8) return 1.0;
+        
+        // Step 1: Convert little-endian uint32 array back to big-endian bytes (pool's original hex format)
+        // Pool sends hex "0000040000..." (in reading order) but stores as LE uint32 array with [7]=0x400
+        // We need to reverse the array order and write as BE to get the original byte sequence
+        const targetBin = Buffer.alloc(32);
+        for (let i = 0; i < 8; i++) {
+            const uint32 = targetArray[7 - i];  // Reverse the array
+            targetBin.writeUInt32BE(uint32, i * 4);
+        }
+        
+        // Step 2: Reverse bytes to create target_be (like ccminer's loop)
+        const targetBe = Buffer.alloc(32);
+        let bitsStart = null;
+        for (let i = 0; i < 32; i++) {
+            targetBe[31 - i] = targetBin[i];
+            if (targetBin[i] !== 0 && bitsStart === null) {
+                bitsStart = i;
+            }
+        }
+        
+        if (bitsStart === null) return 1.0;  // All zeros
+        
+        // Step 3: Calculate exponent
+        const padding = 31 - bitsStart;
+        const exponent = Math.ceil((padding * 8 + 1) / 8);
+        
+        // Step 4: Extract coefficient (3 bytes) from target_be starting at [exponent-3]
+        const offset = exponent - 3;
+        let coefficient = 0;
+        if (offset >= 0 && offset + 2 < 32) {
+            // Read 3 bytes in little-endian order (like memcpy into a uint32)
+            coefficient = (targetBe[offset] & 0xFF) | 
+                         ((targetBe[offset + 1] & 0xFF) << 8) |
+                         ((targetBe[offset + 2] & 0xFF) << 16);
+        }
+        
+        // Step 5: Build target_bits
+        const targetBits = coefficient | (exponent << 24);
+        
+        // Step 6: Calculate difficulty using target_to_diff_verus
+        const exponentByte = (targetBits >>> 24) & 0xFF;
+        const significand = targetBits & 0xFFFFFF;
+        
+        if (significand === 0) return 1.0;
+        
+        // ldexp(x, n) = x * 2^n
+        const exponentDiff = 8 * (0x20 - exponentByte);
+        const diff = (0x0f0f0f / significand) * Math.pow(2, exponentDiff);
+        
+        if (config.debug) {
+            this.log(`calculateDifficultyFromTarget: padding=${padding}, exponent=0x${exponent.toString(16)}, targetBits=0x${targetBits.toString(16)}, significand=0x${significand.toString(16)}, exponentDiff=${exponentDiff}, diff=${diff.toFixed(6)}`);
+        }
+        
+        return diff;
     }
 
     incrementXnonce2() {
@@ -515,106 +605,62 @@ class StratumClient {
         // Build target array - initialize with zeros first
         const target = new Array(8).fill(0);
         
-        // Priority: mining.set_target from pool takes precedence
-        // Then: target calculated from mining.set_difficulty
-        // Finally: target from nbits
+        // --- TARGET FIX ---
+        // Priority: mining.set_target > mining.set_difficulty > nbits
         if (this.currentTarget && this.currentTarget.length >= 32) {
-            // Use mining.set_target if provided by pool
-            // CRITICAL FIX: CPU miner reverses the entire 32-byte buffer first!
-            // See stratum.cpp lines 956-969: target_be[31-i] = target_bin[i]
-            const reversedTarget = Buffer.alloc(32);
+            // ccminer reverses the entire 32-byte target array
+            // Pool sends: [0x00, 0x00, 0x04, 0x00, ...] (big-endian)
+            // Reverse to: [0x00, ..., 0x04, 0x00, 0x00] (like ccminer)
+            // Then read as little-endian uint32[8]
+            const reversed = Buffer.alloc(32);
             for (let i = 0; i < 32; i++) {
-                reversedTarget[31 - i] = this.currentTarget[i];
+                reversed[i] = this.currentTarget[31 - i];
             }
             
-            // Now read as little-endian uint32s
+            // Read as little-endian uint32 array
             for (let i = 0; i < 8; i++) {
-                target[i] = reversedTarget.readUInt32LE(i * 4);
+                target[i] = reversed.readUInt32LE(i * 4);
             }
             
             if (config.debug) {
                 this.log(`Target from mining.set_target: ${target.map(x => x.toString(16).padStart(8, '0')).join(' ')}`);
+                this.log(`Target MSB (index 7): 0x${target[7].toString(16)}`);
+            }
+        } 
+        else if (this.currentDifficulty > 0) {
+            // Fallback: calculate from difficulty
+            const diffTarget = this.difficultyToTarget(this.currentDifficulty);
+            if (diffTarget) {
+                for (let i = 0; i < 8; i++) {
+                    target[i] = diffTarget[i];
+                }
+                this.log(`Target from difficulty ${this.currentDifficulty}: ${target.map(x => x.toString(16).padStart(8, '0')).join(' ')}`);
             }
         }
         else if (nbitsBuf && nbitsBuf.length === 4) {
-            // Read nbits as little-endian uint32
+            // Last resort: calculate from nbits (network block target - VERY HARD!)
             const nbitsValue = nbitsBuf.readUInt32LE(0);
-            
-            // Extract exponent and mantissa from compact format
-            // nbits format: 0xAABBCCDD where AA is exponent, BBCCDD is mantissa
             const exponent = (nbitsValue >>> 24) & 0xFF;
             const mantissa = nbitsValue & 0x00FFFFFF;
             
-            // Build 256-bit target from compact form
-            // Target = mantissa * 256^(exponent - 3)
-            const targetBytes = Buffer.alloc(32, 0);
-            
+            // Calculate 256-bit target from nbits
+            // This is the NETWORK target, not share target!
             if (exponent <= 3) {
-                // Shift mantissa right
                 const shift = 3 - exponent;
                 const value = mantissa >>> (shift * 8);
-                if (value >= 0) {
-                    targetBytes.writeUInt32BE(value, 28); // Write to lowest bytes
-                }
+                // MSB is at index 7 in little-endian array
+                target[7] = value >>> 0;
             } else {
-                // Normal case: place mantissa at position (exponent - 3)
                 const offset = exponent - 3;
                 if (offset <= 29) {
-                    // Write mantissa as big-endian at calculated offset
-                    targetBytes[32 - offset - 3] = (mantissa >>> 16) & 0xFF;
-                    targetBytes[32 - offset - 2] = (mantissa >>> 8) & 0xFF;
-                    targetBytes[32 - offset - 1] = mantissa & 0xFF;
+                    let value = 0;
+                    if (offset <= 29) value |= (mantissa >>> 16) & 0xFF;
+                    if (offset <= 30) value |= (mantissa >>> 8) & 0xFF;
+                    if (offset <= 31) value |= mantissa & 0xFF;
+                    target[7 - offset] = value;
                 }
             }
-            
-            // Reverse entire buffer (big-endian to little-endian byte order)
-            const reversedTarget = Buffer.alloc(32);
-            for (let i = 0; i < 32; i++) {
-                reversedTarget[31 - i] = targetBytes[i];
-            }
-            
-            // Read as little-endian uint32s
-            for (let i = 0; i < 8; i++) {
-                target[i] = reversedTarget.readUInt32LE(i * 4);
-            }
-            
-            if (config.debug) {
-                this.log(`Target from nbits 0x${nbitsValue.toString(16)}: ${target.map(x => x.toString(16).padStart(8, '0')).join(' ')}`);
-            }
-        }
-        else if (this.currentDifficulty && this.currentDifficulty > 0) {
-            // Fallback: Calculate target from difficulty if no mining.set_target or nbits
-            const calculatedTarget = this.difficultyToTarget(this.currentDifficulty);
-            if (calculatedTarget && calculatedTarget.length >= 32) {
-                // Reverse and read as little-endian uint32s (same as mining.set_target path)
-                const reversedTarget = Buffer.alloc(32);
-                for (let i = 0; i < 32; i++) {
-                    reversedTarget[31 - i] = calculatedTarget[i];
-                }
-                
-                for (let i = 0; i < 8; i++) {
-                    target[i] = reversedTarget.readUInt32LE(i * 4);
-                }
-                
-                if (config.debug) {
-                    this.log(`Target from difficulty ${this.currentDifficulty}: ${target.map(x => x.toString(16).padStart(8, '0')).join(' ')}`);
-                }
-            } else {
-                // Fallback to default target
-                target.fill(0xFFFFFFFF);
-                target[7] = 0x7FFFFFFF;
-                if (config.debug) {
-                    this.log(`WARNING: Could not calculate target from difficulty, using default`);
-                }
-            }
-        }
-        else {
-            // Default target (very easy for testing)
-            target.fill(0xFFFFFFFF);
-            target[7] = 0x7FFFFFFF;
-            if (config.debug) {
-                this.log(`WARNING: Using default target (difficulty: ${this.currentDifficulty}, nbits: ${nbitsBuf ? nbitsBuf.length : 'null'})`);
-            }
+            this.log(`WARNING: Using NETWORK target from nbits (VERY HARD!): ${target.map(x => x.toString(16).padStart(8, '0')).join(' ')}`);
         }
 
         // Build work object for WASM
@@ -642,11 +688,93 @@ class StratumClient {
             this.log(`First 32 bytes of extra: ${Buffer.from(extraArray.slice(0, 32)).toString('hex')}`);
         }
         
-        // CRITICAL: DON'T pad solution with zeros!
-        // scanhash_verus reads work->solution (1344 bytes) to build sol_data
-        // If we pad with zeros, sol_data will be full of zeros!
-        // Instead, keep original size (229 bytes) and pad ONLY when passing to WASM memory
-        const solutionArray = Array.from(solutionBuf);
+        // CRITICAL FIX: Set pool nonce at extra[1332]
+        // The pool nonce is a 15-byte field used by stratum.cpp for submission
+        // Reference: cpu-miner-verus verusscan_simple.cpp lines 269-290, and stratum.cpp lines 1204-1208
+        // Structure (FIXED LAYOUT):
+        //   Bytes 0-N: xnonce1 (variable length from mining.subscribe response)
+        //   Bytes N+1 to M: xnonce2 (always 4 bytes - incremented per job)
+        //   Rest: Padding and found nonce (filled at submission time)
+        // NOTE: Verus Stratum sends 4-byte xnonce1 (0x3ffc9155), NOT 3-byte!
+        // The 15-byte pool nonce is just for reference storage; the actual submission
+        // uses the full 32-byte work->data[27] region with dynamic offset based on xnonce1_size.
+        const poolNonce = Buffer.alloc(15, 0);
+        
+        // Copy xnonce1: USE FULL LENGTH from pool (typically 4 bytes for Verus)
+        // DO NOT truncate to 3 bytes!
+        if (this.xnonce1 && this.xnonce1.length > 0) {
+            const copyLen = Math.min(this.xnonce1.length, 8);  // max 8 bytes in case of unusual pool
+            this.xnonce1.copy(poolNonce, 0, 0, copyLen);
+        }
+        
+        // Copy xnonce2: exactly 4 bytes (should be exactly 4 bytes from subscription)
+        // Position starts right after xnonce1
+        const xnonce1Len = this.xnonce1 ? this.xnonce1.length : 0;
+        if (this.xnonce2 && this.xnonce2.length >= 4) {
+            this.xnonce2.copy(poolNonce, xnonce1Len, 0, 4);
+        } else if (this.xnonce2 && this.xnonce2.length > 0) {
+            this.xnonce2.copy(poolNonce, xnonce1Len, 0, this.xnonce2.length);
+        }
+        
+        // Rest of poolNonce: Leave as zeros (will be filled with found nonce at submit time)
+        
+        // Place pool nonce in extra at offset 1332
+        for (let i = 0; i < 15; i++) {
+            if (1332 + i < extraArray.length) {
+                extraArray[1332 + i] = poolNonce[i];
+            }
+        }
+        
+        if (config.debug) {
+            console.log(`[POOL NONCE] Initialized at extra[1332]:`);
+            console.log(`[POOL NONCE]   xnonce1: ${this.xnonce1.toString('hex')} (${this.xnonce1.length} bytes)`);
+            console.log(`[POOL NONCE]   xnonce2: ${this.xnonce2.toString('hex')} (${this.xnonce2.length} bytes)`);
+            console.log(`[POOL NONCE]   pool_nonce: ${poolNonce.toString('hex')}`);
+            console.log(`[POOL NONCE]   Bytes 0-2 (xn1): ${poolNonce.slice(0, 3).toString('hex')}`);
+            console.log(`[POOL NONCE]   Bytes 3-6 (xn2): ${poolNonce.slice(3, 7).toString('hex')}`);
+            console.log(`[POOL NONCE]   Bytes 7-10 (add): ${poolNonce.slice(7, 11).toString('hex')}`);
+            console.log(`[POOL NONCE]   Bytes 11-14 (nonce): ${poolNonce.slice(11, 15).toString('hex')} (will be updated at submit)`);
+        }
+        
+        // CRITICAL: Pad solution to 1344 bytes!
+        // The WASM code expects work->solution to be 1344 bytes, and it will be read
+        // by scanhash_verus to build sol_data. If we don't pad to full size here,
+        // the JavaScript side will fill with zeros when copying to WASM memory.
+        // It's better to pad on server side to ensure proper structure.
+        const solutionArray = Array(1344).fill(0);
+        for (let i = 0; i < Math.min(solutionBuf.length, 1344); i++) {
+            solutionArray[i] = solutionBuf[i];
+        }
+        
+        if (config.debug) {
+            this.log(`Solution padded to 1344 bytes (original: ${solutionBuf.length})`);
+        }
+        
+        // TEST MODE: Disabled - use actual pool difficulty for real shares
+        // The test mode target was too easy and produced fake shares that didn't hash correctly.
+        // With the nonce format now fixed, we should mine at actual pool difficulty.
+        if (false && config.testMode) {  // DISABLED
+            // Previous test mode code - left for reference
+            const testTarget = new Array(8).fill(0);
+            testTarget[0] = 0xffffffff;
+            testTarget[1] = 0xffffffff;
+            testTarget[2] = 0xffffffff;
+            testTarget[3] = 0xffffffff;
+            testTarget[4] = 0xffffffff;
+            testTarget[5] = 0xffffffff;
+            testTarget[6] = 0xffffffff;
+            testTarget[7] = 0x04000000;
+            
+            for (let i = 0; i < 8; i++) {
+                target[i] = testTarget[i];
+            }
+            this.log(`[TEST MODE] Using easy test target: ${target.map(x => x.toString(16).padStart(8, '0')).join(' ')}`);
+            console.log(`[TEST] Target[7]: 0x${target[7].toString(16)}`);
+        }
+        // NOTE: Now using actual pool difficulty from mining.set_target or mining.set_difficulty
+        
+        // Calculate difficulty using the correct ccminer algorithm
+        const workDifficulty = this.calculateDifficultyFromTarget(target);
         
         const work = {
             data: data,
@@ -656,10 +784,12 @@ class StratumClient {
             start_nonce: 0,
             max_nonce: 0xFFFFFFFF,
             job_id: jobId,
-            targetdiff: this.currentDifficulty,
+            targetdiff: workDifficulty,  // Use calculated difficulty
             ntime: ntime  // Store ntime for share submission
         };
 
+        this.log(`Work built: job=${jobId}, target[7]=0x${target[7].toString(16)}, diff≈${workDifficulty.toFixed(6)}`);
+        
         return work;
     }
 
@@ -709,10 +839,24 @@ class StratumClient {
         //   cbin2hex(solhex, (const char*)work->extra, 1347);
         //   cbin2hex(solHexRestore, (const char*)&work->solution[8], 64);
         //   memcpy(&solhex[6+16], solHexRestore, 128);  // Restore 64 bytes at hex position 22
-        let rawExtra = Buffer.from(extra);
         
-        // First, convert extra to hex (with fd4005 prefix - DO NOT strip it!)
-        let solutionHex = rawExtra.slice(0, 1347).toString('hex'); // Total 1347 bytes (fd4005 prefix + 1344 solution)
+        // CRITICAL FIX: Make a copy of extra that we'll update with the found nonce
+        let extraForSolution = Buffer.from(extra);
+        
+        // Update bytes 11-14 of the pool nonce (at extra[1332+11] = extra[1343]) with the found nonce
+        // The found nonce is a uint32 in little-endian format
+        const nonceLEBuf = Buffer.alloc(4);
+        nonceLEBuf.writeUInt32LE(nonce >>> 0, 0);
+        
+        // Set bytes 11-14 of pool nonce to the found nonce
+        for (let i = 0; i < 4; i++) {
+            if (1343 + i < extraForSolution.length) {
+                extraForSolution[1343 + i] = nonceLEBuf[i];
+            }
+        }
+        
+        // Now build solutionHex from the UPDATED extra (with nonce bytes filled in)
+        let solutionHex = extraForSolution.slice(0, 1347).toString('hex'); // Total 1347 bytes (fd4005 prefix + 1344 solution)
         
         if (config.debug) {
             this.log(`[DEBUG] Solution with prefix: ${solutionHex.length / 2} bytes`);
@@ -747,41 +891,64 @@ class StratumClient {
         }
 
         // 1. Prepare the Nonce
-        // Verus Stratum expects a nonce field of (32 - xnonce1_size) bytes.
-        // See cpu-miner-verus stratum.cpp lines 1204-1208:
-        //   nonce_len = 32 - sctx->xnonce1_size;
-        //   noncestr = bin2hex(&nonce[sctx->xnonce1_size], nonce_len);
-        // This contains: xnonce2 + padding + actual_nonce + more_padding
+        // According to ccminer equi-stratum.cpp line 284-286:
+        //   unsigned char * nonce = (unsigned char*) (&work->data[27]);
+        //   size_t nonce_len = 32 - stratum.xnonce1_size;
+        //   noncestr = bin2hex(&nonce[stratum.xnonce1_size], nonce_len);
         // 
-        // Memory layout from work->data[27] onwards:
-        //   data[27]: xnonce1 (4 bytes) - SKIPPED
-        //   data[28]: xnonce2 (4 bytes)
-        //   data[29]: zeros
-        //   data[30]: actual nonce (4 bytes)
-        //   data[31-34]: zeros/padding
-        const nonceLen = 32 - this.xnonce1Size; // Should be 28 bytes for xnonce1 of 4 bytes
-        const nonceBuf = Buffer.alloc(nonceLen, 0);
+        // So the submitted nonce is:
+        //   - Start at work.data[27] + xnonce1_size (skip the xnonce1 bytes)
+        //   - Length is (32 - xnonce1_size) bytes
+        //   - This includes xnonce2 + additional nonce + found nonce
         
-        // Copy xnonce2 at start (from work.data[28])
-        if (work.data && work.data.length > 28 && this.xnonce2Size > 0) {
-            const xnonce2Value = work.data[27 + Math.ceil(this.xnonce1Size / 4)]; // data[28] for 4-byte xnonce1
-            if (xnonce2Value !== undefined) {
-                nonceBuf.writeUInt32LE(xnonce2Value, 0);
+        let nonceHex = null;
+        if (this.xnonce1 && this.xnonce2 && extraForSolution) {
+            // Build nonce the same way ccminer does:
+            // nonce buffer starts at work->data[27] which is 32 bytes of xnonce + nonce data
+            const nonceBuf = Buffer.alloc(32);
+            let offset = 0;
+            
+            // Copy xnonce1
+            if (this.xnonce1.length > 0) {
+                this.xnonce1.copy(nonceBuf, offset);
+                offset += this.xnonce1.length;
             }
-        }
-        
-        // Write the actual nonce at the correct offset
-        // data[30] is at byte offset 12 from data[27+xnonce1Words]
-        // For xnonce1_size=4 (1 word): data[30] is at offset (30-28)*4 = 8 bytes from start of nonceBuf
-        const nonceOffset = (30 - 27 - Math.ceil(this.xnonce1Size / 4)) * 4; // Should be 8 for xnonce1=4
-        nonceBuf.writeUInt32LE(nonce, nonceOffset);
-        
-        const nonceHex = nonceBuf.toString('hex');
-        
-        if (config.debug) {
-            this.log(`[DEBUG] Built nonce field: ${nonceHex} (${nonceLen} bytes)`);
-            this.log(`[DEBUG]   xnonce1Size: ${this.xnonce1Size}, xnonce2Size: ${this.xnonce2Size}`);
-            this.log(`[DEBUG]   nonceOffset: ${nonceOffset}, actual nonce: 0x${nonce.toString(16)}`);
+            
+            // Copy xnonce2 (4 bytes)
+            if (this.xnonce2.length > 0) {
+                this.xnonce2.copy(nonceBuf, offset);
+                offset += this.xnonce2.length;
+            }
+            
+            // Skip 4 bytes of additional nonce (usually zeros, part of the extended nonce space)
+            offset += 4;  // Now offset = xnonce1_size + 4 + 4 = 8 + 4 = 12 if xnonce1_size=4
+            
+            // Copy found nonce (4 bytes LE)
+            // This goes at position [xnonce1_size + 8], which matches Verus Stratum pool nonce structure
+            const nonceLEBuf = Buffer.alloc(4);
+            nonceLEBuf.writeUInt32LE(nonce >>> 0, 0);
+            nonceLEBuf.copy(nonceBuf, offset);
+            
+            // Now extract the submission nonce:
+            // Start at position xnonce1_size, length is (32 - xnonce1_size)
+            const xnonce1_size = this.xnonce1.length;
+            const nonce_len = 32 - xnonce1_size;
+            const submissionNonceBuf = nonceBuf.slice(xnonce1_size, xnonce1_size + nonce_len);
+            nonceHex = submissionNonceBuf.toString('hex');
+            
+            console.log(`[NONCE-CCMINER] Built nonce like ccminer:`);
+            console.log(`[NONCE-CCMINER]   xnonce1: ${this.xnonce1.toString('hex')} (${xnonce1_size} bytes)`);
+            console.log(`[NONCE-CCMINER]   xnonce2: ${this.xnonce2.toString('hex')}`);
+            console.log(`[NONCE-CCMINER]   found nonce: 0x${nonce.toString(16).padStart(8, '0')}`);
+            console.log(`[NONCE-CCMINER]   full nonce buffer (32 bytes): ${nonceBuf.toString('hex')}`);
+            console.log(`[NONCE-CCMINER]   submission nonce (from offset ${xnonce1_size}, length ${nonce_len}): ${nonceHex}`);
+            console.log(`[NONCE-CCMINER]   submission nonce length: ${nonceHex.length} chars = ${nonceHex.length / 2} bytes`);
+        } else {
+            // Fallback
+            console.error(`[ERROR] Cannot build nonce - missing xnonce1 or xnonce2 or extra`);
+            const nonceBuf = Buffer.alloc(4);
+            nonceBuf.writeUInt32LE(nonce >>> 0, 0);
+            nonceHex = nonceBuf.toString('hex');
         }
 
         // 3. Prepare ntime - Use pool's ntime from work.data[25] (like ccminer and cpu-miner-verus do)
@@ -797,11 +964,12 @@ class StratumClient {
             const ntimeValue = work.data[25]; // Little-endian uint32 from work.data[25]
             // Byte-swap: convert from little-endian (work.data format) to big-endian hex string
             // The pool sends ntime as LE bytes, we store as LE uint32, then swap back to LE hex for submission
-            const ntimeSwapped = (((ntimeValue & 0x000000FF) << 24) | 
-                                  ((ntimeValue & 0x0000FF00) << 8) | 
-                                  ((ntimeValue & 0x00FF0000) >>> 8) | 
-                                  ((ntimeValue & 0xFF000000) >>> 24)) >>> 0;
-            ntimeHex = ntimeSwapped.toString(16).padStart(8, '0');
+            const ntimeSwapped = 
+                ((ntimeValue & 0xFF) << 24) |
+                (((ntimeValue >>> 8) & 0xFF) << 16) |
+                (((ntimeValue >>> 16) & 0xFF) << 8) |
+                ((ntimeValue >>> 24) & 0xFF);
+            ntimeHex = (ntimeSwapped >>> 0).toString(16).padStart(8, '0');
             
             if (config.debug) {
                 // Note: ntimeSwapped is the original pool ntime hex parsed as BE, so for date we use ntimeValue (the actual timestamp)
@@ -858,13 +1026,32 @@ class StratumClient {
             submitUser,                 // worker: base wallet + optional device suffix
             work.job_id,                // job_id from mining.notify
             ntimeHex,                   // ntime (byte-swapped from work.data[25])
-            nonceHex,                   // 4-byte nonce hex (Little-Endian)
-            solutionHex                 // 1347-byte solution hex
+            nonceHex,                   // nonce (currently 4-byte format)
+            solutionHex                 // solution hex
         ];
 
         console.log(`[DEBUG] About to send mining.submit to pool with params:`, params.map(p => 
             typeof p === 'string' && p.length > 100 ? `${p.substring(0, 50)}... (${p.length} chars)` : p
         ));
+        
+        // DETAILED DEBUG: Log what we're actually submitting
+        console.log(`[MINING.SUBMIT] Full submission details:`);
+        console.log(`[MINING.SUBMIT]   [0] worker: "${params[0]}"`);
+        console.log(`[MINING.SUBMIT]   [1] job_id: "${params[1]}"`);
+        console.log(`[MINING.SUBMIT]   [2] ntime: "${params[2]}" (${params[2].length} hex chars = ${params[2].length / 2} bytes)`);
+        console.log(`[MINING.SUBMIT]   [3] nonce: "${params[3]}" (${params[3].length} hex chars = ${params[3].length / 2} bytes) <<< THIS IS THE PROBLEM`);
+        console.log(`[MINING.SUBMIT]   [4] solution: "${params[4].substring(0, 50)}..." (${params[4].length} hex chars = ${params[4].length / 2} bytes)`);
+        console.log(`[MINING.SUBMIT]   Raw nonce parameter: ${JSON.stringify(params[3])}`);
+        
+        // Validate nonce length
+        console.log(`[NONCE-CHECK] Nonce length: ${params[3].length} chars`);
+        if (params[3].length === 8) {
+            console.log(`[NONCE-CHECK]   ✓ 4-byte format (8 hex chars)`);
+        } else if (params[3].length === 30) {
+            console.log(`[NONCE-CHECK]   ✓ 15-byte format (30 hex chars)`);
+        } else {
+            console.error(`[NONCE-CHECK]   ✗ UNEXPECTED LENGTH: ${params[3].length} chars!`);
+        }
         
         // Log what we're about to send
         console.log(`[DEBUG] submitShare calling sendRequest('mining.submit', ...)`);
@@ -874,7 +1061,8 @@ class StratumClient {
                 let accepted = false;
                 let reason = null;
                 if (error) {
-                    console.error(`[ERROR] Share submission error from pool:`, error);
+                    console.error(`[ERROR] Share submission error from pool:`, error.message);
+                    console.error(`[ERROR]   Full error:`, error);
                     this.log(`Share submission error: ${error.message || JSON.stringify(error)}`);
                     this.rejectedShares++;
                     reason = error.message || JSON.stringify(error);
@@ -887,6 +1075,7 @@ class StratumClient {
                     this.rejectedShares++;
                     reason = JSON.stringify(result);
                     console.error(`[REJECTED] Share rejected by pool:`, result);
+                    console.error(`[REJECTED]   Full response:`, JSON.stringify(result, null, 2));
                     this.log(`✗ Share rejected: ${result}`);
                 }
 
@@ -1100,6 +1289,11 @@ class WebSocketServer {
             jobId: data.work ? data.work.job_id : 'missing',
             currentWorkJobId: this.currentWork ? this.currentWork.job_id : 'no current work'
         });
+
+        // DEBUG: Log the target array format being used
+        if (data.work && data.work.target) {
+            console.log(`[SHARE DEBUG] Target array from worker: [${data.work.target.map((x, i) => `[${i}]=0x${x.toString(16).padStart(8,'0')}`).join(', ')}]`);
+        }
         
         if (!data.work || data.nonce === undefined || data.nonce === null) {
             console.error(`[REJECTED] Share rejected: missing work or nonce data`);
@@ -1172,6 +1366,30 @@ class WebSocketServer {
         
         console.log(`[DEBUG] Share validation PASSED - share will be submitted to pool`);
         
+        // DEBUG: Check if share meets target
+        if (config.debug && data.work && data.work.target) {
+            console.log(`[SHARE DEBUG] Target validation:`);
+            console.log(`  Target array: [${data.work.target.map(x => '0x' + x.toString(16).padStart(8, '0')).join(', ')}]`);
+            console.log(`  Target MSB (index 7): 0x${data.work.target[7].toString(16)}`);
+            console.log(`  Expected target MSB for diff=1: 0x00000020`);
+            
+            // Calculate what the actual share hash would need to be
+            const targetMsb = data.work.target[7];
+            const shareDifficulty = targetMsb > 0 ? (0x00000020 / targetMsb) : 0;
+            console.log(`  Share difficulty required: ${shareDifficulty.toFixed(6)}`);
+            
+            // Check if this is even possible
+            if (targetMsb === 0) {
+                console.error(`[ERROR] Target MSB is 0 - impossible to find share!`);
+            } else if (targetMsb > 0x00000020) {
+                console.error(`[ERROR] Target MSB (0x${targetMsb.toString(16)}) > 0x00000020 - share would be INVALID even if perfect!`);
+            } else if (targetMsb === 0x00000020) {
+                console.log(`  Target is base difficulty (diff=1)`);
+            } else {
+                console.log(`  Target is easier than base (diff>1)`);
+            }
+        }
+
         console.log(`[DEBUG] Share passed job_id validation (job: ${shareJobId}, current: ${this.currentWork.job_id}, previous: ${this.previousJobId || 'none'}). Proceeding with submission...`);
 
         const shareKey = `${data.work.job_id}:${data.nonce}`;

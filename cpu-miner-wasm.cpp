@@ -18,7 +18,7 @@
 #include "miner_wasm.h"
 
 // Global variables required by verusscan_simple.cpp and other Verus sources
-int opt_debug = 0;
+int opt_debug = 0;  // Disable debug logging in production
 int opt_quiet = 0;
 int verbose = 0;
 
@@ -79,6 +79,12 @@ int mine_work(struct wasm_work *input, struct wasm_result *output) {
     wasm_to_work(input, &g_work);
     g_work_restart_single.restart = 0;
 
+    // Debug: Log work data to understand what we're hashing
+    if (opt_debug) {
+        printf("[DEBUG] Job: %s, Nonce: 0x%08x - 0x%08x\n", 
+            input->job_id, input->start_nonce, input->max_nonce);
+    }
+
     uint32_t current_nonce = input->start_nonce;
     uint32_t max_nonce = input->max_nonce;
     unsigned long total_hashes = 0;
@@ -86,21 +92,30 @@ int mine_work(struct wasm_work *input, struct wasm_result *output) {
     int found = 0;
 
     // We mine in chunks to keep the browser UI responsive
-    const uint32_t chunk_size = 5000; 
+    const uint32_t chunk_size = 50000; 
     
-    while (current_nonce < max_nonce) {
-        if (g_work_restart_single.restart) break;
-
+    while (current_nonce < max_nonce && !g_work_restart_single.restart) {
+        // Calculate chunk end, ensuring we don't exceed max_nonce
         uint32_t chunk_end = (current_nonce + chunk_size > max_nonce) ? max_nonce : current_nonce + chunk_size;
         
+        // scanhash_verus will update g_work.data[30] with the final nonce it checked
         g_work.data[30] = current_nonce;
         unsigned long chunk_hashes = 0;
         
         // scanhash_verus performs the actual VerusHash 2.2.1 calculation
+        // Returns number of valid shares found (0 or 1+ for Verus)
         found = scanhash_verus(0, &g_work, chunk_end, &chunk_hashes);
         total_hashes += chunk_hashes;
+        
+        // Update current nonce for next iteration
+        // scanhash_verus updates g_work.data[30] to the final nonce checked
         current_nonce = g_work.data[30];
-
+        
+        // If found, scanhash_verus will have:
+        // - Set g_work.valid_nonces > 0
+        // - Populated g_work.nonces[0] with the winning nonce
+        // - Populated g_work.extra with the solution data
+        // - Advanced current_nonce by 100000 (to prevent re-finding same share)
         if (found > 0) break;
     }
 
@@ -108,7 +123,6 @@ int mine_work(struct wasm_work *input, struct wasm_result *output) {
     
     // Fill output
     output->found = (found > 0);
-    output->nonce = (found > 0) ? g_work.nonces[0] : 0;
     output->next_nonce = current_nonce;
     output->hashes_done = total_hashes;
     output->elapsed_time = elapsed;
@@ -116,18 +130,26 @@ int mine_work(struct wasm_work *input, struct wasm_result *output) {
     g_last_hashrate = output->hashrate;
 
     if (found > 0) {
-        // IMPORTANT: Verus solution structure in g_work.extra starts with 'fd4005' (VarInt prefix, 3 bytes)
-        // followed by 1344 bytes of solution data = 1347 bytes total.
-        // verusscan writes exactly 1347 bytes to work->extra (see verusscan_simple.cpp line 288).
-        // The input->extra buffer is 1388 bytes, so we have enough space.
-        /* Ensure the JS-visible input struct reflects the updated scanner state.
-         * scanhash_verus updates g_work.data[30] and g_work.nonces[], but the
-         * input buffer provided by JS is a separate copy. Copy the updated
-         * nonce back into the input so the worker can read work.data[30]
-         * and use it as a reliable fallback when output->nonce is not set.
-         */
-        input->data[30] = g_work.data[30];
+        // CRITICAL: scanhash_verus stores the actual winning nonce in g_work.nonces[0]
+        // NOT in g_work.data[30] (which just tracks iteration progress)
+        output->nonce = g_work.nonces[0];
+        
+        // Debug output to verify nonce handling
+        if (opt_debug) {
+            printf("[WASM] Share found!\n");
+            printf("[WASM]   nonce from work.nonces[0] = 0x%08x\n", g_work.nonces[0]);
+            printf("[WASM]   nonce from work.data[30] = 0x%08x\n", g_work.data[30]);
+            printf("[WASM]   valid_nonces = %d\n", g_work.valid_nonces);
+            printf("[WASM]   Output->nonce = 0x%08x\n", output->nonce);
+        }
+        
+        // Copy the nonce back to input->data[30] and input->nonces[0] so JS can access it
+        input->data[30] = output->nonce;
+        
+        // Copy the solution (extra) that was built by scanhash_verus (1347 bytes)
         memcpy(input->extra, g_work.extra, 1347);
+    } else {
+        output->nonce = 0;
     }
 
     return 0;

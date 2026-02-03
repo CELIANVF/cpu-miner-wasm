@@ -37,4 +37,4 @@ echo "  WebSocket Port: $WS_PORT"
 echo ""
 
 # Run the server
-node server.js
+node server.js --debug

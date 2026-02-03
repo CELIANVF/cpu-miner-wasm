@@ -134,8 +134,16 @@ else
     exit 1
 fi
 
+# Determine script directory and adjust paths accordingly
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+BUILD_DIR="$SCRIPT_DIR"
+if [ -d "$SCRIPT_DIR/server" ] && [ "$(pwd)" = "$SCRIPT_DIR/server" ]; then
+    # Script is being run from the server subdirectory
+    cd "$SCRIPT_DIR"
+fi
+
 # Path to parent directory with verus sources
-PARENT_DIR="../cpu-miner-verus"
+PARENT_DIR="$SCRIPT_DIR/../cpu-miner-verus"
 
 # Compiler flags
 EMCC_FLAGS="-O3"
@@ -156,6 +164,7 @@ INCLUDES="-I$PARENT_DIR -I$PARENT_DIR/verus"
 
 # Verus source files (use portable versions where available)
 VERUS_SOURCES="$PARENT_DIR/verus/haraka_portable.c"
+VERUS_SOURCES="$VERUS_SOURCES $PARENT_DIR/verus/verus_hash.cpp"
 VERUS_SOURCES="$VERUS_SOURCES $PARENT_DIR/verus/verus_clhash_portable.cpp"
 VERUS_SOURCES="$VERUS_SOURCES $PARENT_DIR/verus/verusscan_simple.cpp"
 
